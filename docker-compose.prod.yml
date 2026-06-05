@@ -1,20 +1,13 @@
-# Production override for VPS deployment behind a reverse proxy (Caddy/nginx).
+# Production override: run API and bot from image only (no host volume mounts).
 # Use: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-#
-# API is bound to localhost only — expose HTTPS via Caddy/nginx on the host.
-# Postgres and Redis are not published to the public internet.
+# This avoids host filesystem issues and ensures the same code as the image runs.
 
 services:
   postgres:
     ports: []
-
   redis:
     ports: []
-
   api:
     volumes: []
-    ports:
-      - "127.0.0.1:8000:8000"
-
   bot:
     volumes: []

@@ -30,6 +30,11 @@ class BackendConfig:
         """Initialize configuration from environment variables."""
         self.host: str = os.getenv("HOST", "0.0.0.0")
         self.port: int = int(os.getenv("PORT", "8000"))
+        self.reload: bool = os.getenv("RELOAD", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
         self.database_url: str = os.getenv(
             "DATABASE_URL",
@@ -40,13 +45,13 @@ class BackendConfig:
         self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
         # AI provider configuration (Phase 3)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
-        self.openai_model: str = (
-            os.getenv("OPENAI_MODEL")
-            or os.getenv("GEMINI_MODEL")
-            or "gpt-4o-mini"
-        )
         self.gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
         self.gemini_model: str | None = os.getenv("GEMINI_MODEL")
+        self.openai_model: str = (
+            os.getenv("OPENAI_MODEL")
+            or self.gemini_model
+            or "gpt-4o-mini"
+        )
         self.openai_max_tokens: int = int(os.getenv("OPENAI_MAX_TOKENS", "400"))
         self.openai_temperature: float = float(
             os.getenv("OPENAI_TEMPERATURE", "0.2")
@@ -63,7 +68,7 @@ class BackendConfig:
             os.getenv("AUTH_JWT_EXP_MINUTES", "1440")
         )
         self.frontend_allowed_origins: list[str] = [
-            origin.strip().rstrip("/")
+            origin.strip()
             for origin in os.getenv(
                 "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
             ).split(",")

@@ -153,10 +153,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-_cors_origins = config.frontend_allowed_origins or ["http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=config.frontend_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -184,7 +183,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=True,
+        reload=config.reload,
         log_level=config.log_level.lower(),
     )
 

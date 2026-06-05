@@ -27,7 +27,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=True,
+        reload=config.reload,
         log_level=config.log_level.lower(),
     )
 
