@@ -3,10 +3,6 @@
 # This avoids host filesystem issues and ensures the same code as the image runs.
 
 services:
-  postgres:
-    ports: []
-  redis:
-    ports: []
   api:
     volumes: []
   bot:

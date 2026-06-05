@@ -67,13 +67,10 @@ class AITicketBot(commands.Bot):
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Sync slash commands — guild sync is instant, global takes ~1hr
+        # Sync slash commands
         try:
-            for g in self.guilds:
-                self.tree.copy_global_to(guild=g)
-                await self.tree.sync(guild=g)
             synced = await self.tree.sync()
-            logger.info(f"Synced commands to {len(self.guilds)} guild(s)")
+            logger.info(f"Synced {len(synced)} command(s)")
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
