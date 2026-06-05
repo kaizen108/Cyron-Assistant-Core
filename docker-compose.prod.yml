@@ -1,0 +1,20 @@
+# Production override for VPS deployment behind a reverse proxy (Caddy/nginx).
+# Use: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# API is bound to localhost only — expose HTTPS via Caddy/nginx on the host.
+# Postgres and Redis are not published to the public internet.
+
+services:
+  postgres:
+    ports: []
+
+  redis:
+    ports: []
+
+  api:
+    volumes: []
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  bot:
+    volumes: []

@@ -1,0 +1,110 @@
+# version is obsolete in Compose V2; omit it to avoid warnings.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ai-ticket-postgres
+    environment:
+      POSTGRES_DB: ai_ticket_assistant
+      POSTGRES_USER: postgres
+      # Use POSTGRES_PASSWORD from .env or default "postgres". API must use the same.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-ticket-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: ai-ticket-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-ticket-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: ai-ticket-api
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - HOST=0.0.0.0
+      - PORT=8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-}
+      - DISCORD_CLIENT_ID=${DISCORD_CLIENT_ID}
+      - DISCORD_CLIENT_SECRET=${DISCORD_CLIENT_SECRET}
+      - DISCORD_OAUTH_SCOPE=${DISCORD_OAUTH_SCOPE:-identify guilds}
+      - BACKEND_PUBLIC_URL=${BACKEND_PUBLIC_URL:-http://localhost:8000}
+      - FRONTEND_PUBLIC_URL=${FRONTEND_PUBLIC_URL:-http://localhost:5173}
+      - FRONTEND_ALLOWED_ORIGINS=${FRONTEND_ALLOWED_ORIGINS:-http://localhost:5173}
+      - DISCORD_OAUTH_ALLOWED_REDIRECT_URIS=${DISCORD_OAUTH_ALLOWED_REDIRECT_URIS:-http://localhost:5173/auth/callback}
+      - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-change-this-in-production}
+      - AUTH_JWT_ALGORITHM=${AUTH_JWT_ALGORITHM:-HS256}
+      - AUTH_JWT_EXP_MINUTES=${AUTH_JWT_EXP_MINUTES:-1440}
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/ai_ticket_assistant}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - BOT_API_KEY=${BOT_API_KEY}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ai-ticket-network
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: ai-ticket-bot
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - BACKEND_URL=http://api:8000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - BOT_API_KEY=${BOT_API_KEY}
+    depends_on:
+      - api
+    networks:
+      - ai-ticket-network
+    restart: unless-stopped
+
+networks:
+  ai-ticket-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
