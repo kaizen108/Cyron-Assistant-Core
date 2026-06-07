@@ -29,6 +29,7 @@ from bot.cogs import setup, tickets
 from bot.cogs import ticket_commands
 from bot.utils.embed_builder import create_ticket_embed
 from bot.utils.http_client import get_client
+from bot.views.panel_view import PanelView
 
 # Configure logging
 logging.basicConfig(
@@ -74,6 +75,21 @@ class AITicketBot(commands.Bot):
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
+        # Re-register persistent panel button views so clicks work after restarts.
+        try:
+            client = get_client()
+            registered = 0
+            for guild in self.guilds:
+                panels = await client.get_panels(str(guild.id))
+                for summary in panels:
+                    panel = await client.get_panel(str(guild.id), summary["id"])
+                    if panel:
+                        self.add_view(PanelView(panel))
+                        registered += 1
+            logger.info("Registered %s persistent panel view(s)", registered)
+        except Exception as e:
+            logger.warning("Failed to register persistent panel views: %s", e)
+
         # Let backend know which guilds currently have the bot installed.
         try:
             client = get_client()
@@ -115,11 +131,12 @@ class AITicketBot(commands.Bot):
                     "Thanks for adding me! I provide AI-powered support in ticket channels.\n\n"
                     "**Getting started:**\n"
                     "1. Run `/setup` to create the Tickets category and Support role.\n"
-                    "2. Run `/create-ticket` to open a support ticket.\n"
-                    "3. Send messages in the ticket channel — I'll reply with AI assistance."
+                    "2. Create a panel in the web dashboard (**Panels**).\n"
+                    "3. Run `/sendpanel` in your support channel to post the ticket button.\n"
+                    "4. Members click the button to open tickets — I'll reply with AI assistance."
                 ),
                 color="#00b4ff",
-                footer="Use /setup then /create-ticket to begin.",
+                footer="Use /setup then /sendpanel to publish your ticket panel.",
             )
             channel = guild.system_channel
             if channel is None:
