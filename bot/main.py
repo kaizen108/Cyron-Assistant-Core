@@ -63,17 +63,48 @@ class AITicketBot(commands.Bot):
         await ticket_commands.setup(self)
         logger.info("Cogs loaded successfully")
 
+    async def _sync_app_commands(self) -> None:
+        """Register slash commands with Discord (guild sync is near-instant)."""
+        guild_count = 0
+        for guild in self.guilds:
+            try:
+                self.tree.copy_global_to(guild=guild)
+                synced = await self.tree.sync(guild=guild)
+                guild_count += 1
+                logger.info(
+                    "Synced %s command(s) to guild %s (%s)",
+                    len(synced),
+                    guild.id,
+                    guild.name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Guild command sync failed for %s: %s",
+                    guild.id,
+                    exc,
+                )
+
+        try:
+            global_synced = await self.tree.sync()
+            logger.info(
+                "Global command sync submitted (%s command(s)); "
+                "may take up to ~1 hour to propagate everywhere.",
+                len(global_synced),
+            )
+        except Exception as exc:
+            logger.error("Global command sync failed: %s", exc, exc_info=True)
+
+        if guild_count == 0:
+            logger.warning(
+                "Bot is not in any guilds yet — slash commands will sync on guild join."
+            )
+
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Sync slash commands
-        try:
-            synced = await self.tree.sync()
-            logger.info(f"Synced {len(synced)} command(s)")
-        except Exception as e:
-            logger.error(f"Failed to sync commands: {e}", exc_info=True)
+        await self._sync_app_commands()
 
         # Re-register persistent panel button views so clicks work after restarts.
         try:
@@ -117,6 +148,17 @@ class AITicketBot(commands.Bot):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+        try:
+            self.tree.copy_global_to(guild=guild)
+            synced = await self.tree.sync(guild=guild)
+            logger.info(
+                "Synced %s command(s) to new guild %s",
+                len(synced),
+                guild.id,
+            )
+        except Exception as exc:
+            logger.warning("Command sync failed for new guild %s: %s", guild.id, exc)
+
         try:
             # Mark in backend that this guild has the bot installed
             try:
