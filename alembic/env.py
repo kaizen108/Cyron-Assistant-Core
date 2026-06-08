@@ -63,7 +63,7 @@ def run_migrations_online() -> None:
         # Keep only params psycopg2 understands (none of the asyncpg-specific ones)
         sync_url = base
     from sqlalchemy import create_engine
-    connectable = create_engine(sync_url, poolclass=pool.NullPool, connect_args={"sslmode": "require"})
+    connectable = create_engine(sync_url, poolclass=pool.NullPool, connect_args={"sslmode": "disable"})
 
     with connectable.connect() as connection:
         do_run_migrations(connection)
