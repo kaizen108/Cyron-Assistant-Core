@@ -23,6 +23,7 @@ os.chdir(project_root_str)
 
 # Now import bot modules
 import discord
+from discord import app_commands
 from discord.ext import commands
 from bot.config import config
 from bot.cogs import setup, tickets
@@ -55,33 +56,111 @@ class AITicketBot(commands.Bot):
             help_command=None,  # Disable default help command
         )
 
+    def _command_tree_summary(self) -> str:
+        parts: list[str] = []
+        for cmd in self.tree.get_commands():
+            if isinstance(cmd, app_commands.Group):
+                for sub in cmd.commands:
+                    parts.append(f"{cmd.name}/{sub.name}")
+            else:
+                parts.append(cmd.name)
+        return ", ".join(parts) or "(none)"
+
     async def setup_hook(self) -> None:
         logger.info("Loading cogs...")
         await setup.setup(self)
         await tickets.setup(self)
         await ticket_commands.setup(self)
-        logger.info("Cogs loaded successfully")
+        logger.info(
+            "Cogs loaded — %d command(s) in tree: %s",
+            len(self.tree.get_commands()),
+            self._command_tree_summary(),
+        )
 
     async def _sync_slash_commands(self, guild: discord.Guild | None = None) -> None:
         """Sync slash commands to Discord (guild-scoped = instant visibility)."""
-        targets = [guild] if guild else list(self.guilds)
-        if not targets:
-            synced = await self.tree.sync()
-            names = [c.name for c in synced]
-            logger.info("Synced %d global command(s): %s", len(synced), ", ".join(names) or "(none)")
+        registered = self.tree.get_commands()
+        if not registered:
+            logger.error(
+                "No slash commands registered in the command tree — check cog loading"
+            )
             return
 
-        for g in targets:
-            self.tree.copy_global_to(guild=g)
-            synced = await self.tree.sync(guild=g)
-            names = [c.name for c in synced]
+        targets = [guild] if guild else list(self.guilds)
+        total_synced = 0
+
+        if targets:
+            for g in targets:
+                # Clear only the guild-local tree, then copy from the global tree.
+                # Never call clear_commands(guild=None) here — that wipes the source tree.
+                self.tree.clear_commands(guild=g)
+                self.tree.copy_global_to(guild=g)
+                synced = await self.tree.sync(guild=g)
+                total_synced += len(synced)
+                logger.info(
+                    "Synced %d command(s) to guild %s (%s): %s",
+                    len(synced),
+                    g.name,
+                    g.id,
+                    self._format_synced_names(synced),
+                )
+        else:
+            synced = await self.tree.sync()
+            total_synced = len(synced)
             logger.info(
-                "Synced %d command(s) to guild %s (%s): %s",
+                "Synced %d global command(s): %s",
                 len(synced),
-                g.name,
-                g.id,
-                ", ".join(names) or "(none)",
+                self._format_synced_names(synced),
             )
+
+        if total_synced == 0:
+            logger.warning(
+                "Discord returned 0 synced commands — retrying global sync"
+            )
+            synced = await self.tree.sync()
+            logger.info(
+                "Global fallback synced %d command(s): %s",
+                len(synced),
+                self._format_synced_names(synced),
+            )
+
+    async def _wait_for_backend(self, max_attempts: int = 15, interval: float = 2.0) -> None:
+        """Wait until the backend API accepts connections."""
+        import aiohttp
+
+        url = f"{config.backend_url.rstrip('/')}/health"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as session:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            logger.info("Backend API is reachable at %s", config.backend_url)
+                            return
+            except Exception as exc:
+                logger.warning(
+                    "Backend not ready (attempt %d/%d): %s",
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+            await asyncio.sleep(interval)
+        logger.error(
+            "Backend API still unreachable at %s — check `docker logs ai-ticket-api`",
+            config.backend_url,
+        )
+
+    @staticmethod
+    def _format_synced_names(synced: list) -> str:
+        names: list[str] = []
+        for cmd in synced:
+            if isinstance(cmd, app_commands.Group):
+                for sub in cmd.commands:
+                    names.append(f"{cmd.name}/{sub.name}")
+            else:
+                names.append(cmd.name)
+        return ", ".join(names) or "(none)"
 
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
@@ -97,6 +176,7 @@ class AITicketBot(commands.Bot):
                 logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
         # Let backend know which guilds currently have the bot installed.
+        await self._wait_for_backend()
         try:
             client = get_client()
             for g in self.guilds:

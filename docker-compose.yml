@@ -49,10 +49,10 @@ services:
           "-c",
           "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
         ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - HOST=0.0.0.0
@@ -96,7 +96,8 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - BOT_API_KEY=${BOT_API_KEY}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       - ai-ticket-network
     restart: unless-stopped
