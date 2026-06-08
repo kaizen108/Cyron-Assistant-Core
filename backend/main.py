@@ -156,7 +156,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.frontend_allowed_origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -183,7 +183,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=True,
+        reload=config.reload,
         log_level=config.log_level.lower(),
     )
 

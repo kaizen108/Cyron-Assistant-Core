@@ -23,13 +23,11 @@ if __name__ == "__main__":
     import uvicorn
     from backend.config import config
     
-    reload_enabled = os.getenv("RELOAD", "false").lower() in ("1", "true", "yes")
-
     uvicorn.run(
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=reload_enabled,
+        reload=config.reload,
         log_level=config.log_level.lower(),
     )
 

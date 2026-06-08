@@ -29,7 +29,6 @@ from bot.cogs import setup, tickets
 from bot.cogs import ticket_commands
 from bot.utils.embed_builder import create_ticket_embed
 from bot.utils.http_client import get_client
-from bot.views.panel_view import PanelView
 
 # Configure logging
 logging.basicConfig(
@@ -63,63 +62,24 @@ class AITicketBot(commands.Bot):
         await ticket_commands.setup(self)
         logger.info("Cogs loaded successfully")
 
-    async def _sync_app_commands(self) -> None:
-        """Register slash commands with Discord (guild sync is near-instant)."""
-        guild_count = 0
-        for guild in self.guilds:
-            try:
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-                guild_count += 1
-                logger.info(
-                    "Synced %s command(s) to guild %s (%s)",
-                    len(synced),
-                    guild.id,
-                    guild.name,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Guild command sync failed for %s: %s",
-                    guild.id,
-                    exc,
-                )
-
-        try:
-            global_synced = await self.tree.sync()
-            logger.info(
-                "Global command sync submitted (%s command(s)); "
-                "may take up to ~1 hour to propagate everywhere.",
-                len(global_synced),
-            )
-        except Exception as exc:
-            logger.error("Global command sync failed: %s", exc, exc_info=True)
-
-        if guild_count == 0:
-            logger.warning(
-                "Bot is not in any guilds yet — slash commands will sync on guild join."
-            )
-
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        await self._sync_app_commands()
-
-        # Re-register persistent panel button views so clicks work after restarts.
+        # Sync slash commands — clear global commands first to avoid duplicates,
+        # then sync guild-scoped (instant) only.
         try:
-            client = get_client()
-            registered = 0
-            for guild in self.guilds:
-                panels = await client.get_panels(str(guild.id))
-                for summary in panels:
-                    panel = await client.get_panel(str(guild.id), summary["id"])
-                    if panel:
-                        self.add_view(PanelView(panel))
-                        registered += 1
-            logger.info("Registered %s persistent panel view(s)", registered)
+            # Clear global commands
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            # Sync to each guild
+            for g in self.guilds:
+                self.tree.copy_global_to(guild=g)
+                await self.tree.sync(guild=g)
+            logger.info(f"Synced commands to {len(self.guilds)} guild(s)")
         except Exception as e:
-            logger.warning("Failed to register persistent panel views: %s", e)
+            logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
         # Let backend know which guilds currently have the bot installed.
         try:
@@ -149,17 +109,6 @@ class AITicketBot(commands.Bot):
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
         try:
-            self.tree.copy_global_to(guild=guild)
-            synced = await self.tree.sync(guild=guild)
-            logger.info(
-                "Synced %s command(s) to new guild %s",
-                len(synced),
-                guild.id,
-            )
-        except Exception as exc:
-            logger.warning("Command sync failed for new guild %s: %s", guild.id, exc)
-
-        try:
             # Mark in backend that this guild has the bot installed
             try:
                 client = get_client()
@@ -173,12 +122,11 @@ class AITicketBot(commands.Bot):
                     "Thanks for adding me! I provide AI-powered support in ticket channels.\n\n"
                     "**Getting started:**\n"
                     "1. Run `/setup` to create the Tickets category and Support role.\n"
-                    "2. Create a panel in the web dashboard (**Panels**).\n"
-                    "3. Run `/sendpanel` in your support channel to post the ticket button.\n"
-                    "4. Members click the button to open tickets — I'll reply with AI assistance."
+                    "2. Run `/create-ticket` to open a support ticket.\n"
+                    "3. Send messages in the ticket channel — I'll reply with AI assistance."
                 ),
                 color="#00b4ff",
-                footer="Use /setup then /sendpanel to publish your ticket panel.",
+                footer="Use /setup then /create-ticket to begin.",
             )
             channel = guild.system_channel
             if channel is None:

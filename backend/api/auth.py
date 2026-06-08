@@ -29,16 +29,12 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-def _normalize_redirect_uri(redirect_uri: str) -> str:
-    return redirect_uri.rstrip("/")
-
-
 def _is_allowed_redirect_uri(redirect_uri: str) -> bool:
-    normalized = _normalize_redirect_uri(redirect_uri)
-    return normalized in {
-        _normalize_redirect_uri(uri)
-        for uri in config.discord_oauth_allowed_redirect_uris
-    }
+    normalized = redirect_uri.rstrip("/")
+    return any(
+        normalized == allowed or normalized.startswith(f"{allowed}?")
+        for allowed in config.discord_oauth_allowed_redirect_uris
+    )
 
 
 def _append_query_param(url: str, key: str, value: str) -> str:
