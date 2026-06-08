@@ -62,24 +62,39 @@ class AITicketBot(commands.Bot):
         await ticket_commands.setup(self)
         logger.info("Cogs loaded successfully")
 
+    async def _sync_slash_commands(self, guild: discord.Guild | None = None) -> None:
+        """Sync slash commands to Discord (guild-scoped = instant visibility)."""
+        targets = [guild] if guild else list(self.guilds)
+        if not targets:
+            synced = await self.tree.sync()
+            names = [c.name for c in synced]
+            logger.info("Synced %d global command(s): %s", len(synced), ", ".join(names) or "(none)")
+            return
+
+        for g in targets:
+            self.tree.copy_global_to(guild=g)
+            synced = await self.tree.sync(guild=g)
+            names = [c.name for c in synced]
+            logger.info(
+                "Synced %d command(s) to guild %s (%s): %s",
+                len(synced),
+                g.name,
+                g.id,
+                ", ".join(names) or "(none)",
+            )
+
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Sync slash commands — clear global commands first to avoid duplicates,
-        # then sync guild-scoped (instant) only.
-        try:
-            # Clear global commands
-            self.tree.clear_commands(guild=None)
-            await self.tree.sync()
-            # Sync to each guild
-            for g in self.guilds:
-                self.tree.copy_global_to(guild=g)
-                await self.tree.sync(guild=g)
-            logger.info(f"Synced commands to {len(self.guilds)} guild(s)")
-        except Exception as e:
-            logger.error(f"Failed to sync commands: {e}", exc_info=True)
+        # Sync once per process — guild-scoped sync is instant in Discord.
+        if not getattr(self, "_commands_synced", False):
+            try:
+                await self._sync_slash_commands()
+                self._commands_synced = True
+            except Exception as e:
+                logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
         # Let backend know which guilds currently have the bot installed.
         try:
@@ -108,6 +123,10 @@ class AITicketBot(commands.Bot):
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+        try:
+            await self._sync_slash_commands(guild=guild)
+        except Exception as e:
+            logger.warning("Failed to sync commands for new guild %s: %s", guild.id, e)
         try:
             # Mark in backend that this guild has the bot installed
             try:
