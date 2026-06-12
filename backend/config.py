@@ -5,6 +5,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _strip_trailing_slash(url: str) -> str:
+    return url.rstrip("/")
+
+
+def _split_env_list(name: str, default: str = "") -> list[str]:
+    raw = os.getenv(name, default)
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 # Below this vs top retrieved score → low_confidence flag for UI/analytics.
 MIN_SIMILARITY_THRESHOLD: float = 0.55
 # Strict KB-anchored answers (high similarity).
@@ -58,34 +68,31 @@ class BackendConfig:
         self.auth_jwt_exp_minutes: int = int(
             os.getenv("AUTH_JWT_EXP_MINUTES", "1440")
         )
+        self.frontend_public_url: str = _strip_trailing_slash(
+            os.getenv("FRONTEND_PUBLIC_URL", "http://localhost:5173")
+        )
         self.frontend_allowed_origins: list[str] = [
-            origin.strip().rstrip("/")
-            for origin in os.getenv(
+            _strip_trailing_slash(origin)
+            for origin in _split_env_list(
                 "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
-            ).split(",")
-            if origin.strip()
+            )
         ]
-        self.frontend_public_url: str = os.getenv(
-            "FRONTEND_PUBLIC_URL", "http://localhost:5173"
-        ).rstrip("/")
-        self.discord_oauth_allowed_redirect_uris: list[str] = [
-            uri.strip().rstrip("/")
-            for uri in os.getenv(
-                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
+        default_redirect_uris = ",".join(
+            [
+                f"{self.frontend_public_url}/auth/callback",
                 "http://localhost:5173/auth/callback",
-            ).split(",")
-            if uri.strip()
+            ]
+        )
+        self.discord_oauth_allowed_redirect_uris: list[str] = [
+            _strip_trailing_slash(uri)
+            for uri in _split_env_list(
+                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS", default_redirect_uris
+            )
         ]
-        self.backend_public_url: str = os.getenv(
-            "BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}"
-        ).rstrip("/")
-        self.reload: bool = os.getenv("RELOAD", "false").lower() in (
-            "1",
-            "true",
-            "yes",
+        self.backend_public_url: str = _strip_trailing_slash(
+            os.getenv("BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}")
         )
 
 
 # Global config instance
 config = BackendConfig()
-

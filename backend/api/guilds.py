@@ -354,6 +354,17 @@ async def get_guild_ticket_detail(
     }
 
 
+@router.get("/guilds/{guild_id}/channels")
+async def get_guild_channels_dashboard(
+    guild_id: int = Depends(require_guild_admin),
+    redis: Redis = Depends(get_redis),
+) -> list:
+    """Return cached text channels for dashboard channel selector."""
+    import json
+    raw = await redis.get(f"bot:guild:{guild_id}:channels")
+    return json.loads(raw) if raw else []
+
+
 @router.get("/guilds/{guild_id}/close-settings")
 async def get_close_settings(
     guild_id: int = Depends(require_guild_admin),

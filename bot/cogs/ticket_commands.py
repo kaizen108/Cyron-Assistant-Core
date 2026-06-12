@@ -1,6 +1,5 @@
 """Staff ticket slash commands."""
 
-import asyncio
 import logging
 import discord
 from discord import app_commands
@@ -340,7 +339,6 @@ class TicketCommandsCog(commands.Cog):
     @autoclose_task.before_loop
     async def before_autoclose(self):
         await self.bot.wait_until_ready()
-        await asyncio.sleep(30)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member) -> None:
@@ -367,8 +365,5 @@ class TicketCommandsCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot) -> None:
-    cog = TicketCommandsCog(bot)
-    await bot.add_cog(cog)
-    if cog.ticket_group not in bot.tree.get_commands():
-        bot.tree.add_command(cog.ticket_group)
+    await bot.add_cog(TicketCommandsCog(bot))
     logger.info("TicketCommandsCog loaded")

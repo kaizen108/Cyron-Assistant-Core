@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
-from backend.dependencies import require_guild_admin
+from backend.dependencies import require_guild_admin, get_redis
 from backend.models.ticket_panel import TicketPanel
 
 router = APIRouter(prefix="/guilds/{guild_id}/panels", tags=["panels"])
@@ -218,3 +218,26 @@ async def delete_panel(
     if not panel:
         raise HTTPException(status_code=404, detail="Panel not found")
     await session.delete(panel)
+
+
+class SendPanelRequest(BaseModel):
+    channel_id: int
+
+
+@router.post("/{panel_id}/send")
+async def send_panel_to_channel(
+    panel_id: uuid.UUID,
+    body: SendPanelRequest,
+    guild_id: int = Depends(require_guild_admin),
+    session: AsyncSession = Depends(get_session),
+    redis=Depends(get_redis),
+):
+    """Queue a panel send to a Discord channel via Redis."""
+    import json
+    panel = await _get_panel(session, panel_id, guild_id)
+    if not panel:
+        raise HTTPException(status_code=404, detail="Panel not found")
+
+    task = {"guild_id": guild_id, "panel_id": str(panel_id), "channel_id": body.channel_id}
+    await redis.lpush("bot:pending_panel_sends", json.dumps(task))
+    return {"status": "queued"}

@@ -23,7 +23,6 @@ os.chdir(project_root_str)
 
 # Now import bot modules
 import discord
-from discord import app_commands
 from discord.ext import commands
 from bot.config import config
 from bot.cogs import setup, tickets
@@ -56,131 +55,41 @@ class AITicketBot(commands.Bot):
             help_command=None,  # Disable default help command
         )
 
-    def _command_tree_summary(self) -> str:
-        parts: list[str] = []
-        for cmd in self.tree.get_commands():
-            if isinstance(cmd, app_commands.Group):
-                for sub in cmd.commands:
-                    parts.append(f"{cmd.name}/{sub.name}")
-            else:
-                parts.append(cmd.name)
-        return ", ".join(parts) or "(none)"
-
     async def setup_hook(self) -> None:
         logger.info("Loading cogs...")
         await setup.setup(self)
         await tickets.setup(self)
         await ticket_commands.setup(self)
-        logger.info(
-            "Cogs loaded — %d command(s) in tree: %s",
-            len(self.tree.get_commands()),
-            self._command_tree_summary(),
-        )
-
-    async def _sync_slash_commands(self, guild: discord.Guild | None = None) -> None:
-        """Sync slash commands to Discord (guild-scoped = instant visibility)."""
-        registered = self.tree.get_commands()
-        if not registered:
-            logger.error(
-                "No slash commands registered in the command tree — check cog loading"
-            )
-            return
-
-        targets = [guild] if guild else list(self.guilds)
-        total_synced = 0
-
-        if targets:
-            for g in targets:
-                # Clear only the guild-local tree, then copy from the global tree.
-                # Never call clear_commands(guild=None) here — that wipes the source tree.
-                self.tree.clear_commands(guild=g)
-                self.tree.copy_global_to(guild=g)
-                synced = await self.tree.sync(guild=g)
-                total_synced += len(synced)
-                logger.info(
-                    "Synced %d command(s) to guild %s (%s): %s",
-                    len(synced),
-                    g.name,
-                    g.id,
-                    self._format_synced_names(synced),
-                )
-        else:
-            synced = await self.tree.sync()
-            total_synced = len(synced)
-            logger.info(
-                "Synced %d global command(s): %s",
-                len(synced),
-                self._format_synced_names(synced),
-            )
-
-        if total_synced == 0:
-            logger.warning(
-                "Discord returned 0 synced commands — retrying global sync"
-            )
-            synced = await self.tree.sync()
-            logger.info(
-                "Global fallback synced %d command(s): %s",
-                len(synced),
-                self._format_synced_names(synced),
-            )
-
-    async def _wait_for_backend(self, max_attempts: int = 15, interval: float = 2.0) -> None:
-        """Wait until the backend API accepts connections."""
-        import aiohttp
-
-        url = f"{config.backend_url.rstrip('/')}/health"
-        for attempt in range(1, max_attempts + 1):
-            try:
-                async with aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as session:
-                    async with session.get(url) as response:
-                        if response.status == 200:
-                            logger.info("Backend API is reachable at %s", config.backend_url)
-                            return
-            except Exception as exc:
-                logger.warning(
-                    "Backend not ready (attempt %d/%d): %s",
-                    attempt,
-                    max_attempts,
-                    exc,
-                )
-            await asyncio.sleep(interval)
-        logger.error(
-            "Backend API still unreachable at %s — check `docker logs ai-ticket-api`",
-            config.backend_url,
-        )
-
-    @staticmethod
-    def _format_synced_names(synced: list) -> str:
-        names: list[str] = []
-        for cmd in synced:
-            if isinstance(cmd, app_commands.Group):
-                for sub in cmd.commands:
-                    names.append(f"{cmd.name}/{sub.name}")
-            else:
-                names.append(cmd.name)
-        return ", ".join(names) or "(none)"
+        logger.info("Cogs loaded successfully")
 
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Sync once per process — guild-scoped sync is instant in Discord.
-        if not getattr(self, "_commands_synced", False):
-            try:
-                await self._sync_slash_commands()
-                self._commands_synced = True
-            except Exception as e:
-                logger.error(f"Failed to sync commands: {e}", exc_info=True)
+        # Sync slash commands to each guild explicitly
+        try:
+            synced_count = 0
+            for g in self.guilds:
+                guild_obj = discord.Object(id=g.id)
+                self.tree.copy_global_to(guild=guild_obj)
+                cmds = await self.tree.sync(guild=guild_obj)
+                synced_count += len(cmds)
+                logger.info(f"Synced {len(cmds)} commands to guild {g.id}")
+            logger.info(f"Total synced: {synced_count} commands across {len(self.guilds)} guild(s)")
+        except Exception as e:
+            logger.error(f"Failed to sync commands: {e}", exc_info=True)
 
         # Let backend know which guilds currently have the bot installed.
-        await self._wait_for_backend()
         try:
             client = get_client()
             for g in self.guilds:
                 await client.mark_guild_has_bot(str(g.id), name=g.name)
+                text_channels = [
+                    {"id": str(ch.id), "name": ch.name}
+                    for ch in g.text_channels
+                ]
+                await client.push_guild_channels(str(g.id), text_channels)
         except Exception as e:
             logger.warning(f"Failed to sync bot-installed guilds to backend: {e}")
 
@@ -200,13 +109,53 @@ class AITicketBot(commands.Bot):
         if not hasattr(self, "_refresh_task"):
             self._refresh_task = asyncio.create_task(_refresh_installed_flags())
 
+        # Poll Redis for pending panel sends
+        if not hasattr(self, "_panel_send_task"):
+            self._panel_send_task = asyncio.create_task(self._poll_panel_sends())
+
+    async def _poll_panel_sends(self) -> None:
+        """Poll Redis queue for pending panel send tasks."""
+        import json
+        import aiohttp
+        from bot.views.panel_view import PanelView, build_panel_embed
+        from bot.utils.http_client import get_client
+
+        redis_url = __import__('os').environ.get("REDIS_URL", "redis://localhost:6379/0")
+        try:
+            from redis.asyncio import Redis as ARedis
+            redis = ARedis.from_url(redis_url, decode_responses=True)
+        except Exception as e:
+            logger.warning("panel_send_poll: could not connect to Redis: %s", e)
+            return
+
+        while not self.is_closed():
+            try:
+                item = await redis.rpop("bot:pending_panel_sends")
+                if item:
+                    task = json.loads(item)
+                    guild = self.get_guild(int(task["guild_id"]))
+                    channel = guild.get_channel(int(task["channel_id"])) if guild else None
+                    if guild and channel and isinstance(channel, discord.TextChannel):
+                        client = get_client()
+                        panel = await client.get_panel(str(task["guild_id"]), task["panel_id"])
+                        if panel:
+                            embed = build_panel_embed(panel)
+                            view = PanelView(panel)
+                            msg = await channel.send(embed=embed, view=view)
+                            await client.publish_panel(
+                                guild_id=str(task["guild_id"]),
+                                panel_id=task["panel_id"],
+                                channel_id=channel.id,
+                                message_id=msg.id,
+                            )
+                            logger.info("panel_sent guild=%s panel=%s channel=%s", task["guild_id"], task["panel_id"], channel.id)
+            except Exception as e:
+                logger.warning("panel_send_poll error: %s", e)
+            await asyncio.sleep(2)
+
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
-        try:
-            await self._sync_slash_commands(guild=guild)
-        except Exception as e:
-            logger.warning("Failed to sync commands for new guild %s: %s", guild.id, e)
         try:
             # Mark in backend that this guild has the bot installed
             try:

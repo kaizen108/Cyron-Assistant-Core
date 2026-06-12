@@ -46,11 +46,13 @@ class SetupCog(commands.Cog):
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
 
+        await interaction.response.defer(ephemeral=True)
+
         client = get_client()
         panels = await client.get_panels(str(interaction.guild.id))
 
         if not panels:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "No panels configured. Create one from the dashboard first.", ephemeral=True
             )
             return
@@ -61,7 +63,7 @@ class SetupCog(commands.Cog):
 
         # Multiple panels — show select menu
         options = [
-            discord.SelectOption(label=p["name"][:100], value=p["id"])
+            discord.SelectOption(label=p["name"][:100] or "Unnamed", value=p["id"])
             for p in panels[:25]
         ]
 
@@ -75,34 +77,26 @@ class SetupCog(commands.Cog):
 
         view = discord.ui.View(timeout=60)
         view.add_item(PanelSelect())
-        await interaction.response.send_message("Select a panel:", view=view, ephemeral=True)
+        await interaction.followup.send("Select a panel:", view=view, ephemeral=True)
 
     async def _send_panel_embed(self, interaction: discord.Interaction, panel_id: str) -> None:
         client = get_client()
         panel = await client.get_panel(str(interaction.guild.id), panel_id)
         if not panel:
-            try:
-                await interaction.followup.send("Panel not found.", ephemeral=True)
-            except Exception:
-                await interaction.response.send_message("Panel not found.", ephemeral=True)
+            await interaction.followup.send("Panel not found.", ephemeral=True)
             return
 
         embed = build_panel_embed(panel)
         view = PanelView(panel)
         msg = await interaction.channel.send(embed=embed, view=view)
 
-        # Save publish location
         await client.publish_panel(
             guild_id=str(interaction.guild.id),
             panel_id=panel_id,
             channel_id=interaction.channel.id,
             message_id=msg.id,
         )
-
-        try:
-            await interaction.followup.send("✅ Panel sent!", ephemeral=True)
-        except Exception:
-            pass
+        await interaction.followup.send("✅ Panel sent!", ephemeral=True)
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction) -> None:

@@ -221,6 +221,15 @@ class BackendClient:
             logger.warning("get_stale_tickets failed: %s", e)
             return []
 
+    async def push_guild_channels(self, guild_id: str, channels: list) -> None:
+        url = f"{self.base_url}/internal/bot/guilds/{guild_id}/channels"
+        session = await self._get_session()
+        try:
+            async with session.post(url, json={"channels": channels}, headers=self._bot_headers) as r:
+                pass
+        except Exception as e:
+            logger.warning("push_guild_channels failed: %s", e)
+
     async def relay_message(
         self,
         guild_id: str,
