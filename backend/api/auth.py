@@ -35,10 +35,18 @@ def _normalize_redirect_uri(redirect_uri: str) -> str:
 
 def _is_allowed_redirect_uri(redirect_uri: str) -> bool:
     normalized = _normalize_redirect_uri(redirect_uri)
-    return normalized in {
+    allowed = {
         _normalize_redirect_uri(uri)
         for uri in config.discord_oauth_allowed_redirect_uris
     }
+    if normalized not in allowed:
+        logger.warning(
+            "auth_redirect_uri_rejected",
+            redirect_uri=normalized,
+            allowed=sorted(allowed),
+        )
+        return False
+    return True
 
 
 def _append_query_param(url: str, key: str, value: str) -> str:
