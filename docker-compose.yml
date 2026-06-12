@@ -98,6 +98,7 @@ services:
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - BACKEND_URL=http://api:8000
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - BOT_API_KEY=${BOT_API_KEY}
     depends_on:

@@ -6,6 +6,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from bot.utils.http_client import get_client
+from bot.utils.interactions import defer_ephemeral, defer_if_needed, reply
 from bot.utils.ticket_logger import log_ticket_event
 
 logger = logging.getLogger(__name__)
@@ -61,17 +62,20 @@ class TicketCommandsCog(commands.Cog):
     @app_commands.describe(reason="Reason for closing")
     async def ticket_close(self, interaction: discord.Interaction, reason: str | None = None) -> None:
         if not interaction.guild:
+            await reply(interaction, "This command can only be used in a server.")
             return
+
+        await defer_ephemeral(interaction)
+
         ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
         if not ticket:
-            await interaction.response.send_message("This is not a registered ticket channel.", ephemeral=True)
+            await reply(interaction, "This is not a registered ticket channel.")
             return
 
         member = interaction.user
         is_support = _has_support(member)
         is_creator = ticket.get("user_id") and int(ticket["user_id"]) == member.id
 
-        # Check users_can_close from panel
         client = get_client()
         panel = None
         if ticket.get("panel_id"):
@@ -79,10 +83,9 @@ class TicketCommandsCog(commands.Cog):
         users_can_close = panel.get("users_can_close", False) if panel else False
 
         if not is_support and not (users_can_close and is_creator):
-            await interaction.response.send_message("You don't have permission to close this ticket.", ephemeral=True)
+            await reply(interaction, "You don't have permission to close this ticket.")
             return
 
-        await interaction.response.defer(ephemeral=True)
         from bot.views.ticket_view import _do_close_ticket
         await _do_close_ticket(interaction, interaction.channel.id, member, reason=reason)
 
@@ -124,13 +127,15 @@ class TicketCommandsCog(commands.Cog):
     @ticket_group.command(name="claim", description="Claim this ticket")
     async def ticket_claim(self, interaction: discord.Interaction) -> None:
         if not _has_support(interaction.user):
-            await interaction.response.send_message("Support only.", ephemeral=True)
+            await reply(interaction, "Support only.")
             return
+
+        await defer_if_needed(interaction, ephemeral=False)
 
         client = get_client()
         ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
         if not ticket:
-            await interaction.response.send_message("Not a registered ticket.", ephemeral=True)
+            await reply(interaction, "Not a registered ticket.", ephemeral=True)
             return
 
         panel = None
@@ -142,7 +147,7 @@ class TicketCommandsCog(commands.Cog):
 
         await _apply_claim_permissions(interaction.channel, interaction.user, support_role_ids, visibility)
         await client.claim_ticket(str(interaction.guild.id), str(interaction.channel.id), str(interaction.user.id))
-        await interaction.response.send_message(f"Ticket claimed by {interaction.user.mention}.")
+        await reply(interaction, f"Ticket claimed by {interaction.user.mention}.", ephemeral=False)
         try:
             await log_ticket_event(self.bot, interaction.guild, "TICKET_CLAIMED", interaction.channel, interaction.user, panel=panel)
         except Exception:
@@ -151,8 +156,10 @@ class TicketCommandsCog(commands.Cog):
     @ticket_group.command(name="unclaim", description="Unclaim this ticket")
     async def ticket_unclaim(self, interaction: discord.Interaction) -> None:
         if not _has_support(interaction.user):
-            await interaction.response.send_message("Support only.", ephemeral=True)
+            await reply(interaction, "Support only.")
             return
+
+        await defer_if_needed(interaction, ephemeral=False)
 
         client = get_client()
         ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
@@ -163,7 +170,7 @@ class TicketCommandsCog(commands.Cog):
         support_role_ids = (panel.get("support_role_ids") or []) if panel else []
         await _revert_claim_permissions(interaction.channel, support_role_ids)
         await client.unclaim_ticket(str(interaction.guild.id), str(interaction.channel.id))
-        await interaction.response.send_message("Ticket unclaimed.")
+        await reply(interaction, "Ticket unclaimed.", ephemeral=False)
         try:
             await log_ticket_event(self.bot, interaction.guild, "TICKET_UNCLAIMED", interaction.channel, interaction.user, panel=panel)
         except Exception:
@@ -194,9 +201,11 @@ class TicketCommandsCog(commands.Cog):
 
     @ticket_group.command(name="info", description="Show ticket information")
     async def ticket_info(self, interaction: discord.Interaction) -> None:
+        await defer_ephemeral(interaction)
+
         ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
         if not ticket:
-            await interaction.response.send_message("Not a registered ticket.", ephemeral=True)
+            await reply(interaction, "Not a registered ticket.")
             return
 
         embed = discord.Embed(title="Ticket Info", color=discord.Colour.blurple())
@@ -211,18 +220,20 @@ class TicketCommandsCog(commands.Cog):
             embed.add_field(name="Claimed by", value=claimer.mention if claimer else str(ticket["claimed_by_user_id"]), inline=True)
         if ticket.get("priority"):
             embed.add_field(name="Priority", value=f"{PRIORITY_EMOJI.get(ticket['priority'], '')} {ticket['priority']}", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await reply(interaction, embed=embed)
 
     @ticket_group.command(name="requestclose", description="Ask the ticket creator to confirm closure")
     @app_commands.describe(reason="Optional reason", timeout="Minutes before auto-close (0 = no auto-close)")
     async def ticket_requestclose(self, interaction: discord.Interaction, reason: str | None = None, timeout: int = 0) -> None:
         if not _has_support(interaction.user):
-            await interaction.response.send_message("Support only.", ephemeral=True)
+            await reply(interaction, "Support only.")
             return
+
+        await defer_if_needed(interaction, ephemeral=False)
 
         ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
         if not ticket:
-            await interaction.response.send_message("Not a registered ticket.", ephemeral=True)
+            await reply(interaction, "Not a registered ticket.", ephemeral=True)
             return
 
         embed = discord.Embed(
@@ -267,23 +278,25 @@ class TicketCommandsCog(commands.Cog):
                     except Exception as e:
                         logger.warning("requestclose timeout auto-close failed: %s", e)
 
-        await interaction.response.send_message(embed=embed, view=ConfirmView())
+        await reply(interaction, embed=embed, view=ConfirmView(), ephemeral=False)
 
     @app_commands.command(name="new", description="Open a new support ticket")
     async def new_ticket(self, interaction: discord.Interaction) -> None:
         if not interaction.guild:
+            await reply(interaction, "This command can only be used in a server.")
             return
+
+        await defer_ephemeral(interaction)
+
         client = get_client()
         panels = await client.get_panels(str(interaction.guild.id))
         if not panels:
-            await interaction.response.send_message("No ticket panels available.", ephemeral=True)
+            await reply(interaction, "No ticket panels available.")
             return
 
         if len(panels) == 1:
-            from bot.views.panel_view import handle_panel_button
-            # Simulate a panel_open interaction
             interaction.data = {"custom_id": f"panel_open:{panels[0]['id']}"}
-            from bot.views.panel_view import create_ticket_channel, handle_panel_button
+            from bot.views.panel_view import handle_panel_button
             await handle_panel_button(interaction)
             return
 
@@ -294,6 +307,7 @@ class TicketCommandsCog(commands.Cog):
                 super().__init__(placeholder="Select a ticket category…", options=options)
 
             async def callback(self_, sel_interaction: discord.Interaction):
+                await defer_ephemeral(sel_interaction)
                 sel_interaction.data = {"custom_id": f"panel_open:{self_.values[0]}"}
                 from bot.views.panel_view import handle_panel_button
                 await handle_panel_button(sel_interaction)
@@ -301,7 +315,7 @@ class TicketCommandsCog(commands.Cog):
         view = discord.ui.View(timeout=60)
         view.add_item(PanelSelect())
         embed = discord.Embed(title="Ticket Category", description="Select the most relevant category for your ticket.", color=discord.Colour.blurple())
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        await reply(interaction, embed=embed, view=view)
 
     @tasks.loop(hours=1)
     async def autoclose_task(self) -> None:

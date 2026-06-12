@@ -55,6 +55,8 @@ class TicketsCog(commands.Cog):
                 )
                 return
 
+            await interaction.response.defer(ephemeral=True)
+
             # Check if user already has an open ticket
             user_id = interaction.user.id
             ticket_channel_name = f"ticket-{user_id}"
@@ -63,7 +65,7 @@ class TicketsCog(commands.Cog):
                     channel.name == ticket_channel_name
                     and channel.type == ChannelType.text
                 ):
-                    await interaction.response.send_message(
+                    await interaction.followup.send(
                         f"❌ You already have an open ticket: {channel.mention}",
                         ephemeral=True,
                     )
@@ -109,7 +111,7 @@ class TicketsCog(commands.Cog):
                 reason=f"Ticket created by {interaction.user}",
             )
 
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True
             )
 
@@ -138,11 +140,18 @@ class TicketsCog(commands.Cog):
 
         except Exception as e:
             logger.error(f"Error creating ticket: {e}", exc_info=True)
-            await interaction.response.send_message(
-                "❌ An error occurred while creating the ticket. "
-                "Please check bot permissions.",
-                ephemeral=True,
-            )
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "❌ An error occurred while creating the ticket. "
+                    "Please check bot permissions.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "❌ An error occurred while creating the ticket. "
+                    "Please check bot permissions.",
+                    ephemeral=True,
+                )
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction) -> None:

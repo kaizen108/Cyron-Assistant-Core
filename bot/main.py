@@ -23,6 +23,7 @@ os.chdir(project_root_str)
 
 # Now import bot modules
 import discord
+from discord import app_commands
 from discord.ext import commands
 from bot.config import config
 from bot.cogs import setup, tickets
@@ -54,6 +55,7 @@ class AITicketBot(commands.Bot):
             intents=intents,
             help_command=None,  # Disable default help command
         )
+        self._commands_synced = False
 
     async def setup_hook(self) -> None:
         logger.info("Loading cogs...")
@@ -62,23 +64,38 @@ class AITicketBot(commands.Bot):
         await ticket_commands.setup(self)
         logger.info("Cogs loaded successfully")
 
+    async def _sync_commands(self, guild: discord.Guild | None = None) -> None:
+        """Sync guild slash commands and clear stale global duplicates."""
+        try:
+            # Remove global commands so Discord doesn't show duplicates
+            # alongside guild-scoped commands.
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+
+            targets = [guild] if guild else list(self.guilds)
+            synced_count = 0
+            for g in targets:
+                guild_obj = discord.Object(id=g.id)
+                self.tree.copy_global_to(guild=guild_obj)
+                cmds = await self.tree.sync(guild=guild_obj)
+                synced_count += len(cmds)
+                logger.info("Synced %s commands to guild %s", len(cmds), g.id)
+            logger.info(
+                "Total synced: %s commands across %s guild(s)",
+                synced_count,
+                len(targets),
+            )
+        except Exception as e:
+            logger.error("Failed to sync commands: %s", e, exc_info=True)
+
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
-        # Sync slash commands to each guild explicitly
-        try:
-            synced_count = 0
-            for g in self.guilds:
-                guild_obj = discord.Object(id=g.id)
-                self.tree.copy_global_to(guild=guild_obj)
-                cmds = await self.tree.sync(guild=guild_obj)
-                synced_count += len(cmds)
-                logger.info(f"Synced {len(cmds)} commands to guild {g.id}")
-            logger.info(f"Total synced: {synced_count} commands across {len(self.guilds)} guild(s)")
-        except Exception as e:
-            logger.error(f"Failed to sync commands: {e}", exc_info=True)
+        if not self._commands_synced:
+            await self._sync_commands()
+            self._commands_synced = True
 
         # Let backend know which guilds currently have the bot installed.
         try:
@@ -153,9 +170,32 @@ class AITicketBot(commands.Bot):
                 logger.warning("panel_send_poll error: %s", e)
             await asyncio.sleep(2)
 
+    async def on_app_command_error(
+        self,
+        interaction: discord.Interaction,
+        error: app_commands.AppCommandError,
+    ) -> None:
+        """Surface permission/check failures instead of silent Discord errors."""
+        if isinstance(error, app_commands.MissingPermissions):
+            message = "You don't have permission to run this command."
+        elif isinstance(error, app_commands.CheckFailure):
+            message = "You are not allowed to run this command."
+        else:
+            logger.error("app_command_error: %s", error, exc_info=error)
+            message = "Something went wrong while running that command."
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception as exc:
+            logger.warning("Failed to send app command error: %s", exc)
+
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild. Send welcome embed."""
         logger.info(f"Joined new guild: {guild.name} (ID: {guild.id})")
+        await self._sync_commands(guild=guild)
         try:
             # Mark in backend that this guild has the bot installed
             try:
