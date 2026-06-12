@@ -1,9 +1,0 @@
-# Reverse proxy for the backend API on VPS.
-# Install Caddy, point api.cyronticket.com DNS to this server, then:
-#   caddy run --config Caddyfile
-#
-# Docker Compose must expose the API on localhost:8000 (default).
-
-api.cyronticket.com {
-	reverse_proxy localhost:8000
-}

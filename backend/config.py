@@ -5,16 +5,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
-def _strip_trailing_slash(url: str) -> str:
-    return url.rstrip("/")
-
-
-def _split_env_list(name: str, default: str = "") -> list[str]:
-    raw = os.getenv(name, default)
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
 # Below this vs top retrieved score → low_confidence flag for UI/analytics.
 MIN_SIMILARITY_THRESHOLD: float = 0.55
 # Strict KB-anchored answers (high similarity).
@@ -50,7 +40,11 @@ class BackendConfig:
         self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
         # AI provider configuration (Phase 3)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
-        self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.openai_model: str = (
+            os.getenv("OPENAI_MODEL")
+            or os.getenv("GEMINI_MODEL")
+            or "gpt-4o-mini"
+        )
         self.gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
         self.gemini_model: str | None = os.getenv("GEMINI_MODEL")
         self.openai_max_tokens: int = int(os.getenv("OPENAI_MAX_TOKENS", "400"))
@@ -68,31 +62,29 @@ class BackendConfig:
         self.auth_jwt_exp_minutes: int = int(
             os.getenv("AUTH_JWT_EXP_MINUTES", "1440")
         )
-        self.frontend_public_url: str = _strip_trailing_slash(
-            os.getenv("FRONTEND_PUBLIC_URL", "http://localhost:5173")
-        )
         self.frontend_allowed_origins: list[str] = [
-            _strip_trailing_slash(origin)
-            for origin in _split_env_list(
+            origin.strip().rstrip("/")
+            for origin in os.getenv(
                 "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
-            )
+            ).split(",")
+            if origin.strip()
         ]
-        default_redirect_uris = ",".join(
-            [
-                f"{self.frontend_public_url}/auth/callback",
-                "http://localhost:5173/auth/callback",
-            ]
-        )
         self.discord_oauth_allowed_redirect_uris: list[str] = [
-            _strip_trailing_slash(uri)
-            for uri in _split_env_list(
-                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS", default_redirect_uris
-            )
+            uri.strip().rstrip("/")
+            for uri in os.getenv(
+                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
+                "http://localhost:5173/auth/callback",
+            ).split(",")
+            if uri.strip()
         ]
-        self.backend_public_url: str = _strip_trailing_slash(
-            os.getenv("BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}")
-        )
+        self.frontend_public_url: str = os.getenv(
+            "FRONTEND_PUBLIC_URL", "http://localhost:5173"
+        ).rstrip("/")
+        self.backend_public_url: str = os.getenv(
+            "BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}"
+        ).rstrip("/")
 
 
 # Global config instance
 config = BackendConfig()
+
