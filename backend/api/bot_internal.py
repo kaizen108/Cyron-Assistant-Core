@@ -427,7 +427,7 @@ async def send_panel_to_channel(
     return {"status": "ok", "guild_id": gid, "panel_id": str(pid), "channel_id": body.channel_id}
 
 
-
+@router.get("/guilds/{guild_id}/panels/{panel_id}/public")
 async def get_panel_public(
     guild_id: str,
     panel_id: str,

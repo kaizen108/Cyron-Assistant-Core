@@ -40,11 +40,7 @@ class BackendConfig:
         self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
         # AI provider configuration (Phase 3)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
-        self.openai_model: str = (
-            os.getenv("OPENAI_MODEL")
-            or os.getenv("GEMINI_MODEL")
-            or "gpt-4o-mini"
-        )
+        self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.gemini_api_key: str | None = os.getenv("GEMINI_API_KEY")
         self.gemini_model: str | None = os.getenv("GEMINI_MODEL")
         self.openai_max_tokens: int = int(os.getenv("OPENAI_MAX_TOKENS", "400"))
@@ -70,7 +66,7 @@ class BackendConfig:
             if origin.strip()
         ]
         self.discord_oauth_allowed_redirect_uris: list[str] = [
-            uri.strip().rstrip("/")
+            uri.strip()
             for uri in os.getenv(
                 "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
                 "http://localhost:5173/auth/callback",

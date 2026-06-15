@@ -23,15 +23,11 @@ if __name__ == "__main__":
     import uvicorn
     from backend.config import config
     
-    reload = os.getenv("RELOAD", "false").lower() in ("1", "true", "yes")
-
     uvicorn.run(
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=reload,
-        proxy_headers=True,
-        forwarded_allow_ips="*",
+        reload=os.getenv("RELOAD", "true").lower() in ("true", "1", "yes"),
         log_level=config.log_level.lower(),
     )
 

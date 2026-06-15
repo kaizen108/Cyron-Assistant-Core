@@ -30,9 +30,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 def _is_allowed_redirect_uri(redirect_uri: str) -> bool:
-    normalized = redirect_uri.rstrip("/")
     return any(
-        normalized == uri or normalized.startswith(f"{uri}/")
+        redirect_uri.startswith(uri)
         for uri in config.discord_oauth_allowed_redirect_uris
     )
 

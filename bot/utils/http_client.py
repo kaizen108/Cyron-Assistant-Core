@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class BackendClient:
     """Async HTTP client for communicating with the backend API."""
 
-    def __init__(self, base_url: str, timeout: int = 8) -> None:
+    def __init__(self, base_url: str, timeout: int = 10) -> None:
         """
         Initialize the backend client.
 

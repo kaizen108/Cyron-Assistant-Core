@@ -6,7 +6,6 @@ import discord
 from discord import ui
 
 from bot.utils.http_client import get_client
-from bot.utils.interactions import defer_ephemeral, reply
 from bot.utils.placeholders import resolve_placeholders
 from bot.utils.support_hours import is_support_open
 from bot.utils.ticket_logger import log_ticket_event
@@ -74,31 +73,17 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
     member = interaction.user
 
     if not guild or not isinstance(member, discord.Member):
-        await reply(interaction, "This can only be used in a server.")
+        await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
         return
 
     client = get_client()
-    panel = None
-
-    # Forms require a modal as the first response. Only that path may fetch
-    # before defer; every other path acknowledges Discord immediately.
-    if not interaction.response.is_done():
-        panel = await client.get_panel(str(guild.id), panel_id)
-        if panel and panel.get("forms_enabled") and panel.get("form_questions"):
-            await interaction.response.send_modal(DynamicTicketModal(panel, member))
-            return
-        await defer_ephemeral(interaction)
-    else:
-        await defer_ephemeral(interaction)
-
-    if panel is None:
-        panel = await client.get_panel(str(guild.id), panel_id)
+    panel = await client.get_panel(str(guild.id), panel_id)
     if not panel:
-        await reply(interaction, "Panel not found.")
+        await interaction.response.send_message("Panel not found.", ephemeral=True)
         return
 
     if not panel.get("is_enabled", True):
-        await reply(interaction, "This panel is currently disabled.")
+        await interaction.response.send_message("This panel is currently disabled.", ephemeral=True)
         return
 
     # Support hours check
@@ -107,7 +92,7 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
         if panel.get("closed_state_logic") == "deny_creation":
             msg_data = panel.get("msg_closed") or {}
             msg = msg_data.get("description") or "Support is currently closed. Please try again during support hours."
-            await reply(interaction, msg)
+            await interaction.response.send_message(msg, ephemeral=True)
             return
         # allow_with_warning — continue but warn after creation
 
@@ -115,12 +100,12 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
     member_role_ids = {r.id for r in member.roles}
     required = panel.get("roles_required") or []
     if required and not any(int(r) in member_role_ids for r in required):
-        await reply(interaction, "You don't have the required role to open a ticket.")
+        await interaction.response.send_message("You don't have the required role to open a ticket.", ephemeral=True)
         return
 
     blocked = panel.get("roles_blocked") or []
     if any(int(r) in member_role_ids for r in blocked):
-        await reply(interaction, "You are not allowed to open a ticket.")
+        await interaction.response.send_message("You are not allowed to open a ticket.", ephemeral=True)
         return
 
     # Cooldown check
@@ -131,23 +116,35 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
         elapsed = time.time() - last
         if elapsed < cooldown_secs:
             remaining = int(cooldown_secs - elapsed)
-            await reply(interaction, f"Please wait {remaining}s before opening another ticket.")
+            await interaction.response.send_message(
+                f"Please wait {remaining}s before opening another ticket.", ephemeral=True
+            )
             return
 
     # Max open tickets check
     max_tickets = panel.get("max_open_tickets_per_user", 1)
     open_tickets = await client.get_open_tickets_by_user(str(guild.id), str(member.id))
+    # Filter to this panel
     panel_open = [t for t in open_tickets]
     if len(panel_open) >= max_tickets:
+        # Find existing channel
         existing_channel_id = panel_open[0].get("channel_id") if panel_open else None
         msg = "You already have an open ticket."
         if existing_channel_id:
             ch = guild.get_channel(int(existing_channel_id))
             if ch:
                 msg = f"You already have an open ticket: {ch.mention}"
-        await reply(interaction, msg)
+        await interaction.response.send_message(msg, ephemeral=True)
         return
 
+    # Forms check
+    if panel.get("forms_enabled") and panel.get("form_questions"):
+        modal = DynamicTicketModal(panel, member)
+        await interaction.response.send_modal(modal)
+        return
+
+    # Create ticket directly
+    await interaction.response.defer(ephemeral=True)
     await create_ticket_channel(interaction, panel, member, form_answers=None)
 
     # Out-of-hours warning (after creation)

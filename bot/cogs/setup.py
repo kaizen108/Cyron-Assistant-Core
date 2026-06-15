@@ -21,7 +21,6 @@ class SetupCog(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
         try:
             tickets_category = discord.utils.get(interaction.guild.categories, name="Tickets")
             if not tickets_category:
@@ -31,13 +30,14 @@ class SetupCog(commands.Cog):
             if not support_role:
                 support_role = await interaction.guild.create_role(name="Support", mentionable=True)
 
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 f"✅ Setup complete!\n- Category: {tickets_category.mention}\n- Role: {support_role.mention}",
                 ephemeral=True,
             )
         except Exception as e:
             logger.error("Error during setup: %s", e, exc_info=True)
-            await interaction.followup.send("❌ An error occurred during setup.", ephemeral=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ An error occurred during setup.", ephemeral=True)
 
     @app_commands.command(name="sendpanel", description="Send a ticket panel in this channel")
     @app_commands.checks.has_permissions(administrator=True)

@@ -1,7 +1,8 @@
-# Example Nginx reverse proxy for api.cyronticket.com on the VPS.
-# Install: sudo apt install nginx certbot python3-certbot-nginx
-# Copy to /etc/nginx/sites-available/api.cyronticket.com and symlink sites-enabled.
-# TLS: sudo certbot --nginx -d api.cyronticket.com
+# Install nginx on the VPS, then:
+#   sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/api.cyronticket.com
+#   sudo ln -s /etc/nginx/sites-available/api.cyronticket.com /etc/nginx/sites-enabled/
+#   sudo certbot --nginx -d api.cyronticket.com
+#   sudo nginx -t && sudo systemctl reload nginx
 
 server {
     listen 80;
@@ -14,7 +15,5 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
     }
 }
