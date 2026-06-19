@@ -59,23 +59,12 @@ class BackendConfig:
             os.getenv("AUTH_JWT_EXP_MINUTES", "1440")
         )
         self.frontend_allowed_origins: list[str] = [
-            origin.strip().rstrip("/")
+            origin.strip()
             for origin in os.getenv(
                 "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
             ).split(",")
             if origin.strip()
         ]
-        self.discord_oauth_allowed_redirect_uris: list[str] = [
-            uri.strip()
-            for uri in os.getenv(
-                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
-                "http://localhost:5173/auth/callback",
-            ).split(",")
-            if uri.strip()
-        ]
-        self.frontend_public_url: str = os.getenv(
-            "FRONTEND_PUBLIC_URL", "http://localhost:5173"
-        ).rstrip("/")
         self.backend_public_url: str = os.getenv(
             "BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}"
         ).rstrip("/")

@@ -1,23 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-backend.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-backend.txt
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
-# Copy backend code and alembic
-COPY backend/ ./backend/
-COPY shared/ ./shared/
-COPY alembic/ ./alembic/
-COPY alembic.ini ./
+# Copy dependency file first for Docker cache
+COPY requirements.txt .
 
-# Expose port
-EXPOSE 8000
+# Install dependencies
+RUN uv pip install --system -r requirements.txt
 
-# Run migrations then start backend
-CMD alembic upgrade head && uvicorn backend.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'
+# Copy entire project
+COPY . .
 
+# Run application
+CMD ["uv", "run", "run_backend.py"]

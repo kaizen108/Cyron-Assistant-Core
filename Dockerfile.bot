@@ -1,18 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends gcc \
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gcc \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-bot.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-bot.txt
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
-# Copy bot code
-COPY bot/ ./bot/
-COPY shared/ ./shared/
+# Copy dependency file first for Docker cache
+COPY requirements.txt .
 
-# Run bot
-CMD ["python", "-m", "bot.main"]
+# Install dependencies
+RUN uv pip install --system -r requirements.txt
 
+# Copy entire project
+COPY . .
+
+# Run application
+CMD ["uv", "run", "run_bot.py"]

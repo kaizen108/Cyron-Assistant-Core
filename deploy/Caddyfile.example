@@ -1,9 +1,0 @@
-# Install Caddy on the VPS, then:
-#   sudo cp deploy/Caddyfile.example /etc/caddy/Caddyfile
-#   sudo systemctl reload caddy
-#
-# Ensure DNS for api.cyronticket.com points to this VPS before starting Caddy.
-
-api.cyronticket.com {
-	reverse_proxy 127.0.0.1:8000
-}
