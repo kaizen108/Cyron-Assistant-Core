@@ -1,0 +1,34 @@
+# Reverse-proxy api.cyronticket.com → Docker API on port 8000.
+# Place on VPS at /etc/nginx/sites-available/api.cyronticket.com (Debian/Ubuntu).
+#
+# Prerequisites:
+#   - DNS A record: api.cyronticket.com → VPS IP
+#   - certbot: sudo certbot --nginx -d api.cyronticket.com
+#   - docker compose up -d (API binds 127.0.0.1:8000)
+
+server {
+    listen 80;
+    server_name api.cyronticket.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name api.cyronticket.com;
+
+    # certbot fills these paths:
+    ssl_certificate     /etc/letsencrypt/live/api.cyronticket.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.cyronticket.com/privkey.pem;
+
+    client_max_body_size 10m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+}
