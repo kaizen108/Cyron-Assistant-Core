@@ -1,6 +1,5 @@
 """Message relay endpoint - Phase 2 full flow."""
 
-import hashlib
 import json
 import re
 import uuid
@@ -21,7 +20,6 @@ from backend.services.limit_service import (
     check_monthly_tokens,
 )
 from backend.config import (
-    COMPACT_CACHE_TTL_SEC,
     COMPACT_EARLY_EXIT_SIM,
     COMPACT_HIGH_MATCH,
     COMPACT_MAX_QUERY_CHARS,
@@ -43,6 +41,12 @@ from backend.services.usage_service import log_usage
 from backend.services.retrieval_query import english_for_embedding_search
 from backend.services.intent_classifier import classify_relay_intent
 from backend.services.context_service import get_context_by_panel, panel_cache_key, cache_get, cache_set
+from backend.services.relay_cache import (
+    relay_exact_cache_key,
+    should_store_relay_cache,
+    should_use_compact_rag,
+)
+from backend.services.relay_panel import is_panel_status_query, panel_status_reply
 from backend.services.response_routing import (
     detect_language_hint,
     greeting_reply_for_language,
@@ -51,7 +55,6 @@ from backend.services.response_routing import (
     is_very_short_ack_lightweight,
     kb_fallback_reply_for_language,
 )
-from backend.utils.embeddings import embed_text
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/relay", tags=["relay"])
@@ -75,45 +78,63 @@ def _looks_like_simple_faq(text: str) -> bool:
     return any(re.search(p, q, re.I) for p in patterns)
 
 
-def _response_cache_key(guild_id: int, text: str, lang: str) -> str:
-    norm = " ".join((text or "").strip().lower().split())
+async def _try_cached_short_reply(
+    redis: Redis,
+    guild_id: int,
+    qtext: str,
+    lang: str,
+    effective_panel_id: uuid.UUID | None,
+    ai_context,
+    context_version: int,
+) -> str | None:
+    """Return cached reply only on exact query match (never fuzzy embedding buckets)."""
+    if not should_store_relay_cache(qtext):
+        return None
+
+    if effective_panel_id and ai_context:
+        cache_key = panel_cache_key(effective_panel_id, context_version, lang, qtext)
+    else:
+        cache_key = relay_exact_cache_key(guild_id, lang, qtext)
+
+    cached_raw = await cache_get(redis, cache_key)
+    if not cached_raw:
+        return None
+
     try:
-        vec = embed_text(norm)
-        coarse = ",".join(f"{x:.2f}" for x in vec[:12])
-        digest = hashlib.sha256(coarse.encode("utf-8")).hexdigest()[:24]
+        blob = json.loads(cached_raw)
+        reply = str(blob.get("reply", "")).strip()
+        return reply or None
     except Exception:
-        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
-    return f"relay:short:{guild_id}:{lang}:{digest}"
+        return None
 
 
-def _response_cache_key_fuzzy(guild_id: int, text: str, lang: str) -> str:
-    """Forgiving cache key — quantized embedding prefix (~neighborhood matches)."""
-    norm = " ".join((text or "").strip().lower().split())
-    try:
-        vec = embed_text(norm)
-        buckets = ",".join(f"{round(v * 4) / 4:.2f}" for v in vec[:16])
-        digest = hashlib.sha256(buckets.encode("utf-8")).hexdigest()[:24]
-    except Exception:
-        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
-    return f"relay:shortf:{guild_id}:{lang}:{digest}"
-
-
-async def _cache_get_short(redis: Redis, guild_id: int, text: str, lang: str) -> str | None:
-    ek = _response_cache_key(guild_id, text, lang)
-    hit = await redis.get(ek)
-    if hit:
-        return hit
-    fk = _response_cache_key_fuzzy(guild_id, text, lang)
-    return await redis.get(fk)
-
-
-async def _cache_set_short(
-    redis: Redis, guild_id: int, text: str, lang: str, blob: str
+async def _store_cached_short_reply(
+    redis: Redis,
+    guild_id: int,
+    qtext: str,
+    lang: str,
+    reply: str,
+    effective_panel_id: uuid.UUID | None,
+    ai_context,
+    context_version: int,
+    knowledge_chunks: list,
 ) -> None:
-    ek = _response_cache_key(guild_id, text, lang)
-    fk = _response_cache_key_fuzzy(guild_id, text, lang)
-    await redis.setex(ek, COMPACT_CACHE_TTL_SEC, blob)
-    await redis.setex(fk, COMPACT_CACHE_TTL_SEC, blob)
+    if not should_store_relay_cache(qtext):
+        return
+
+    kb_snippet = ""
+    if knowledge_chunks:
+        kb_snippet = str(knowledge_chunks[0].get("main_content", ""))[:240]
+    blob_str = json.dumps({"reply": reply, "kb": kb_snippet}, ensure_ascii=False)
+
+    try:
+        if effective_panel_id and ai_context:
+            cache_key = panel_cache_key(effective_panel_id, context_version, lang, qtext)
+        else:
+            cache_key = relay_exact_cache_key(guild_id, lang, qtext)
+        await cache_set(redis, cache_key, blob_str)
+    except Exception:
+        logger.warning("short_query_cache_store_failed", guild_id=guild_id)
 
 
 @router.post("", response_model=RelayResponse)
@@ -230,6 +251,47 @@ async def relay_message(
 
             intent = await classify_relay_intent(payload.content)
 
+            # Panel on/off questions — answer from ticket_panels row (no LLM, no KB search).
+            if effective_panel_id and is_panel_status_query(payload.content):
+                panel_reply = await panel_status_reply(
+                    session, effective_panel_id, guild_id
+                )
+                if panel_reply:
+                    reply = panel_reply
+                    prompt_context = PromptContext(
+                        system_prompt="",
+                        knowledge_chunks=[],
+                        message_history=[],
+                        user_language=lang,
+                        retrieval_mode="none",
+                    )
+                    logger.info(
+                        "relay_path",
+                        path="panel_status",
+                        guild_id=guild_id,
+                        panel_id=str(effective_panel_id),
+                    )
+                    await add_message(session, ticket.id, "assistant", reply)
+                    await session.flush()
+                    await log_usage(
+                        session=session,
+                        redis=redis,
+                        guild_id=guild_id,
+                        tokens_used=0,
+                        request_type="ai_response",
+                    )
+                    return RelayResponse(
+                        status="ok",
+                        reply=reply,
+                        prompt_context=prompt_context,
+                        concurrent_now=current_concurrent,
+                        low_confidence=False,
+                        injected_knowledge_chars=0,
+                        top_similarity=0.0,
+                        token_usage={"input": 0, "output": 0},
+                        embed_color=guild.embed_color or "#00b4ff",
+                    )
+
             if intent == "generic":
                 if is_greeting_or_smalltalk(payload.content):
                     reply = greeting_reply_for_language(lang)
@@ -326,45 +388,60 @@ async def relay_message(
                 simple_candidate = _is_simple_query(qtext) or _looks_like_simple_faq(qtext)
 
                 if simple_candidate:
-                    # v2: use versioned panel cache key if panel is known
-                    if effective_panel_id and ai_context:
-                        v2_key = panel_cache_key(effective_panel_id, context_version, lang, qtext)
-                        cached_raw = await cache_get(redis, v2_key)
-                    else:
-                        cached_raw = await _cache_get_short(redis, guild_id, qtext, lang)
-                    if cached_raw:
-                        try:
-                            blob = json.loads(cached_raw)
-                            reply = str(blob.get("reply", "")).strip()
-                            if reply:
-                                prompt_tokens = 0
-                                completion_tokens = 0
-                                prompt_context = PromptContext(
-                                    system_prompt="",
-                                    knowledge_chunks=[],
-                                    message_history=[],
-                                    user_language=lang,
-                                    retrieval_mode="none",
-                                    compact_reply=True,
-                                )
-                                logger.info("COMPACT_PATH_TAKEN", prompt_tokens=0, completion_tokens=0, total_tokens=0, cache_hit=True)
-                                logger.info("relay_path", path="short_query_cache_hit", guild_id=guild_id, lang=lang)
-                                await add_message(session, ticket.id, "assistant", reply)
-                                await session.flush()
-                                await log_usage(session=session, redis=redis, guild_id=guild_id, tokens_used=0, request_type="ai_response")
-                                return RelayResponse(
-                                    status="ok",
-                                    reply=reply,
-                                    prompt_context=prompt_context,
-                                    concurrent_now=current_concurrent,
-                                    low_confidence=False,
-                                    injected_knowledge_chars=0,
-                                    top_similarity=0.0,
-                                    token_usage={"input": 0, "output": 0},
-                                    embed_color=guild.embed_color or "#00b4ff",
-                                )
-                        except Exception:
-                            pass
+                    cached_reply = await _try_cached_short_reply(
+                        redis,
+                        guild_id,
+                        qtext,
+                        lang,
+                        effective_panel_id,
+                        ai_context,
+                        context_version,
+                    )
+                    if cached_reply:
+                        reply = cached_reply
+                        prompt_tokens = 0
+                        completion_tokens = 0
+                        prompt_context = PromptContext(
+                            system_prompt="",
+                            knowledge_chunks=[],
+                            message_history=[],
+                            user_language=lang,
+                            retrieval_mode="none",
+                            compact_reply=True,
+                        )
+                        logger.info(
+                            "COMPACT_PATH_TAKEN",
+                            prompt_tokens=0,
+                            completion_tokens=0,
+                            total_tokens=0,
+                            cache_hit=True,
+                        )
+                        logger.info(
+                            "relay_path",
+                            path="short_query_cache_hit",
+                            guild_id=guild_id,
+                            lang=lang,
+                        )
+                        await add_message(session, ticket.id, "assistant", reply)
+                        await session.flush()
+                        await log_usage(
+                            session=session,
+                            redis=redis,
+                            guild_id=guild_id,
+                            tokens_used=0,
+                            request_type="ai_response",
+                        )
+                        return RelayResponse(
+                            status="ok",
+                            reply=reply,
+                            prompt_context=prompt_context,
+                            concurrent_now=current_concurrent,
+                            low_confidence=False,
+                            injected_knowledge_chars=0,
+                            top_similarity=0.0,
+                            token_usage={"input": 0, "output": 0},
+                            embed_color=guild.embed_color or "#00b4ff",
+                        )
 
                 emb_query = ""
                 if not simple_candidate:
@@ -413,7 +490,8 @@ async def relay_message(
                     {"role": m.role, "content": m.content} for m in last_msgs
                 ]
                 compact_reply = bool(
-                    simple_candidate
+                    should_use_compact_rag(qtext)
+                    and simple_candidate
                     and top_similarity >= COMPACT_HIGH_MATCH
                     and len(knowledge_chunks) <= 2
                 )
@@ -421,6 +499,7 @@ async def relay_message(
                     not compact_reply
                     and knowledge_chunks
                     and simple_candidate
+                    and should_use_compact_rag(qtext)
                     and len(knowledge_chunks) <= 2
                     and top_similarity >= 0.55
                 ):
@@ -487,20 +566,17 @@ async def relay_message(
                                 cache_hit=False,
                             )
                         if compact_reply and simple_candidate:
-                            kb_snippet = ""
-                            if knowledge_chunks:
-                                kb_snippet = str(
-                                    knowledge_chunks[0].get("main_content", "")
-                                )[:240]
-                            blob_str = json.dumps({"reply": reply, "kb": kb_snippet}, ensure_ascii=False)
-                            try:
-                                if effective_panel_id and ai_context:
-                                    v2_key = panel_cache_key(effective_panel_id, context_version, lang, qtext)
-                                    await cache_set(redis, v2_key, blob_str)
-                                else:
-                                    await _cache_set_short(redis, guild_id, qtext, lang, blob_str)
-                            except Exception:
-                                logger.warning("short_query_cache_store_failed", guild_id=guild_id)
+                            await _store_cached_short_reply(
+                                redis,
+                                guild_id,
+                                qtext,
+                                lang,
+                                reply,
+                                effective_panel_id,
+                                ai_context,
+                                context_version,
+                                knowledge_chunks,
+                            )
                         logger.info(
                             "relay_path",
                             path="knowledge_rag_compact_v22"

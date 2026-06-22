@@ -26,7 +26,7 @@ _SUBSTANTIVE_HINT = re.compile(
     r"refund|billing|payment|charge|invoice|order|ship|track|cancel|subscription|"
     r"password|login|account|error|bug|broken|not\s+working|how\s+do\s+i|why\s+is|"
     r"where\s+(is|can|do)|when\s+(does|will|can)|price|cost|policy|warranty|"
-    r"ticket|ban|mute|role|discord|nitro|robux|"
+    r"ticket|ban|mute|role|discord|nitro|robux|discount|coupon|promo|panel|enabled|"
     r"help\s+with|support|issue|problem|upgrade|download|install|return|deliver|"
     r"hours|verify|appeal|lost|wrong|scam|hack|staff|admin|phone|address|"
     r"not\s+received|didn'?t\s+get|charged\s+twice"

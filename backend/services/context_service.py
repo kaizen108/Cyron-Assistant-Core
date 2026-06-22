@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 
 import structlog
@@ -11,7 +10,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.ai_context import AIContext
-from backend.utils.embeddings import embed_text
 
 logger = structlog.get_logger(__name__)
 
@@ -23,15 +21,10 @@ CACHE_TTL_SEC = 604_800  # 7 days
 # ---------------------------------------------------------------------------
 
 def panel_cache_key(panel_id: uuid.UUID, context_version: int, lang: str, text: str) -> str:
-    """Versioned cache key — version bump auto-invalidates without Redis scan."""
-    norm = " ".join((text or "").strip().lower().split())
-    try:
-        vec = embed_text(norm)
-        buckets = ",".join(f"{round(v * 4) / 4:.2f}" for v in vec[:16])
-        digest = hashlib.sha256(buckets.encode()).hexdigest()[:24]
-    except Exception:
-        digest = hashlib.sha256(norm.encode()).hexdigest()[:24]
-    return f"panel:{panel_id}:ctx:{context_version}:{lang}:{digest}"
+    """Versioned cache key from exact query text (no embedding fuzzy buckets)."""
+    from backend.services.relay_cache import panel_exact_cache_key
+
+    return panel_exact_cache_key(panel_id, context_version, lang, text)
 
 
 async def cache_get(redis: Redis, key: str) -> str | None:

@@ -18,6 +18,8 @@ _FULL_MAIN_LIM = 2800
 
 _COMPACT_SYSTEM = (
     "You are a helpful Discord support assistant. Answer ONLY using the provided knowledge. "
+    "Match the user's specific question (amounts, products, topics). "
+    "If they ask for a specific number or package, quote that line from the knowledge. "
     "Be short, natural and friendly. Reply in the same language as the user. "
     "Never add information not in the knowledge."
 )
@@ -43,7 +45,7 @@ def _build_compact_messages(prompt_context: PromptContext) -> List[Dict[str, str
             parts.append(f"{title}: {body}")
         else:
             parts.append(body)
-    kb = "\n".join(p for p in parts if p).strip()[:520]
+    kb = "\n".join(p for p in parts if p).strip()[:900]
     q = str(getattr(prompt_context, "compact_user_query", "") or "").strip()[:420]
     user_block = f"Knowledge:\n{kb}\n\nUser:\n{q}\nAnswer concisely:"
     return [
@@ -332,8 +334,8 @@ async def get_ai_response(
 
     mode = getattr(prompt_context, "retrieval_mode", None) or "high"
     if compact:
-        temp = 0.3
-        cap = min(100, max_tokens)
+        temp = 0.25
+        cap = min(180, max_tokens)
     else:
         temp = 0.32 if mode == "moderate" else 0.26
         cap = min(250, max_tokens)

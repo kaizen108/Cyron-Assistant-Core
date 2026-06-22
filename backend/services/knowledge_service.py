@@ -768,8 +768,10 @@ async def invalidate_guild_relay_cache(redis, guild_id: int) -> None:
     """Delete all relay response cache keys for a guild."""
     try:
         patterns = [
+            f"relay:exact:{guild_id}:*",
             f"relay:short:{guild_id}:*",
             f"relay:shortf:{guild_id}:*",
+            f"panel:*",
         ]
         for pattern in patterns:
             cursor = 0
