@@ -6,6 +6,10 @@ from discord import app_commands, ChannelType, PermissionOverwrite
 from discord.ext import commands
 
 from bot.utils.http_client import get_client
+from bot.utils.ticket_registry import (
+    register_ticket_channel,
+)
+from bot.views.panel_view import handle_panel_button
 from bot.views.ticket_view import (
     build_ticket_embed,
     handle_ticket_interaction,
@@ -19,21 +23,27 @@ class TicketsCog(commands.Cog):
     """Cog for ticket management and message relay."""
 
     def __init__(self, bot: commands.Bot) -> None:
-        """Initialize the tickets cog."""
         self.bot = bot
         self.client = get_client()
-        # channel_id -> panel_id string cache (populated on first message, lives for session)
-        self._panel_id_cache: dict[int, str | None] = {}
+
+    async def _fetch_open_ticket(self, guild_id: str, channel_id: int) -> dict | None:
+        try:
+            ticket_data = await self.client.get_ticket(guild_id, str(channel_id))
+            if ticket_data and ticket_data.get("status") == "open":
+                register_ticket_channel(
+                    channel_id, ticket_data.get("panel_id")
+                )
+                return ticket_data
+            return None
+        except Exception as exc:
+            logger.debug("get_ticket failed for channel %s: %s", channel_id, exc)
+            return None
 
     @app_commands.command(
         name="create-ticket", description="Create a new support ticket"
     )
     async def create_ticket(self, interaction: discord.Interaction) -> None:
-        """
-        Create a new private ticket channel.
-
-        Creates a channel named "ticket-{user_id}" in the "Tickets" category.
-        """
+        """Legacy ticket flow (ticket-{user_id} naming)."""
         if not interaction.guild:
             await interaction.response.send_message(
                 "This command can only be used in a server.", ephemeral=True
@@ -41,13 +51,9 @@ class TicketsCog(commands.Cog):
             return
 
         try:
-            # Find or create Tickets category
-            tickets_category = None
-            for category in interaction.guild.categories:
-                if category.name.lower() == "tickets":
-                    tickets_category = category
-                    break
-
+            tickets_category = discord.utils.get(
+                interaction.guild.categories, name="Tickets"
+            )
             if not tickets_category:
                 await interaction.response.send_message(
                     "❌ Please run `/setup` first to create the Tickets category.",
@@ -55,7 +61,6 @@ class TicketsCog(commands.Cog):
                 )
                 return
 
-            # Check if user already has an open ticket
             user_id = interaction.user.id
             ticket_channel_name = f"ticket-{user_id}"
             for channel in tickets_category.channels:
@@ -69,14 +74,8 @@ class TicketsCog(commands.Cog):
                     )
                     return
 
-            # Find support role
-            support_role = None
-            for role in interaction.guild.roles:
-                if role.name.lower() == "support":
-                    support_role = role
-                    break
+            support_role = discord.utils.get(interaction.guild.roles, name="Support")
 
-            # Create permission overwrites
             overwrites: dict[object, PermissionOverwrite] = {
                 interaction.guild.default_role: PermissionOverwrite(view_channel=False),
                 interaction.user: PermissionOverwrite(
@@ -85,16 +84,12 @@ class TicketsCog(commands.Cog):
                     read_message_history=True,
                 ),
             }
-
-            # Add support role permissions if it exists
             if support_role:
                 overwrites[support_role] = PermissionOverwrite(
                     view_channel=True,
                     send_messages=True,
                     read_message_history=True,
                 )
-
-            # Add bot permissions
             overwrites[interaction.guild.me] = PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
@@ -102,18 +97,29 @@ class TicketsCog(commands.Cog):
                 manage_messages=True,
             )
 
-            # Create ticket channel
             ticket_channel = await tickets_category.create_text_channel(
                 name=ticket_channel_name,
                 overwrites=overwrites,
                 reason=f"Ticket created by {interaction.user}",
             )
 
+            ticket_number = await self.client.next_ticket_number(
+                str(interaction.guild.id)
+            )
+            await self.client.open_ticket(
+                guild_id=str(interaction.guild.id),
+                channel_id=ticket_channel.id,
+                user_id=user_id,
+                bot_id=interaction.guild.me.id if interaction.guild.me else None,
+                ticket_number=ticket_number,
+                channel_name=ticket_channel_name,
+            )
+            register_ticket_channel(ticket_channel.id, None)
+
             await interaction.response.send_message(
                 f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True
             )
 
-            # Fetch guild settings (embed_color) from backend
             embed_color = "#00b4ff"
             try:
                 guild_data = await self.client.get_guild(str(interaction.guild.id))
@@ -122,7 +128,6 @@ class TicketsCog(commands.Cog):
             except Exception as e:
                 logger.debug("Could not fetch guild embed_color: %s", e)
 
-            # Send premium welcome embed + persistent view
             embed = build_ticket_embed(
                 embed_color=embed_color,
                 created_by=interaction.user,
@@ -132,94 +137,83 @@ class TicketsCog(commands.Cog):
             await ticket_channel.send(embed=embed, view=view)
 
             logger.info(
-                f"Created ticket channel {ticket_channel.id} for user {user_id} "
-                f"in guild {interaction.guild.id}"
+                "Created legacy ticket channel %s for user %s in guild %s",
+                ticket_channel.id,
+                user_id,
+                interaction.guild.id,
             )
 
         except Exception as e:
-            logger.error(f"Error creating ticket: {e}", exc_info=True)
-            await interaction.response.send_message(
-                "❌ An error occurred while creating the ticket. "
-                "Please check bot permissions.",
-                ephemeral=True,
-            )
+            logger.error("Error creating ticket: %s", e, exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "❌ An error occurred while creating the ticket.",
+                    ephemeral=True,
+                )
 
     @commands.Cog.listener()
     async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Route ticket panel button clicks (persistent across restarts via custom_id)."""
+        """Route ticket panel buttons and ticket action buttons."""
+        if interaction.type == discord.InteractionType.component:
+            custom_id = (interaction.data or {}).get("custom_id", "")
+            if custom_id.startswith("panel_open:"):
+                await handle_panel_button(interaction)
+                return
+
         handled = await handle_ticket_interaction(interaction, self.bot)
         if handled:
             return
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        """
-        Listen for messages in ticket channels and relay them to backend.
-
-        Only processes messages in channels starting with "ticket-".
-        Ignores bot messages.
-        """
-        # Ignore bot messages
+        """Relay user messages in registered ticket channels to the backend AI."""
         if message.author.bot:
             return
-
-        # Ignore DMs
         if not message.guild or not message.channel:
             return
-
-        # Only process messages in ticket channels
-        if not message.channel.name.startswith("ticket-"):
+        if message.channel.type != ChannelType.text:
+            return
+        if not (message.content or "").strip():
             return
 
-        # Only process text channels
-        if message.channel.type != ChannelType.text:
+        guild_id = str(message.guild.id)
+        channel_id = message.channel.id
+
+        ticket_data = await self._fetch_open_ticket(guild_id, channel_id)
+        if not ticket_data:
             return
 
         try:
-            logger.debug(
-                f"Processing message in ticket channel {message.channel.id} "
-                f"from user {message.author.id}"
-            )
+            panel_id = ticket_data.get("panel_id")
 
-            # Resolve panel_id for this channel (Option B: from ticket DB row via backend)
-            if message.channel.id not in self._panel_id_cache:
-                try:
-                    ticket_data = await self.client.get_ticket(
-                        str(message.guild.id), str(message.channel.id)
-                    )
-                    self._panel_id_cache[message.channel.id] = (
-                        ticket_data.get("panel_id") if ticket_data else None
-                    )
-                except Exception:
-                    self._panel_id_cache[message.channel.id] = None
-
-            # Show "Cyron Assistant is typing..." while waiting for the backend
             async with message.channel.typing():
                 response_data = await self.client.relay_message(
-                    guild_id=str(message.guild.id),
-                    channel_id=str(message.channel.id),
+                    guild_id=guild_id,
+                    channel_id=str(channel_id),
                     user_id=str(message.author.id),
                     content=message.content,
                     message_id=str(message.id),
                     bot_id=str(self.bot.user.id),
-                    panel_id=self._panel_id_cache.get(message.channel.id),
+                    panel_id=panel_id,
                 )
 
-            # Send response as plain text (like a normal user message)
             reply_text = response_data.get("reply", "AI is thinking...")
             await message.channel.send(reply_text)
 
-            logger.debug(
-                f"Successfully relayed and responded to message in "
-                f"channel {message.channel.id}"
+            logger.info(
+                "relay_ok guild=%s channel=%s panel_id=%s",
+                guild_id,
+                channel_id,
+                panel_id,
             )
 
         except Exception as e:
             logger.error(
-                f"Error relaying message from channel {message.channel.id}: {e}",
+                "Error relaying message from channel %s: %s",
+                channel_id,
+                e,
                 exc_info=True,
             )
-            # Don't send error message if backend rejected due to bot isolation (403)
             if "403" in str(e) or "different bot" in str(e).lower():
                 return
             try:
@@ -228,11 +222,9 @@ class TicketsCog(commands.Cog):
                     "Please try again in a moment."
                 )
             except Exception:
-                logger.error("Failed to send error message to channel")
+                logger.error("Failed to send error message to channel %s", channel_id)
 
 
 async def setup(bot: commands.Bot) -> None:
-    """Add the tickets cog to the bot."""
     await bot.add_cog(TicketsCog(bot))
     logger.info("TicketsCog loaded")
-

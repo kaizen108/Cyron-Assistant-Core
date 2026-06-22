@@ -25,7 +25,7 @@ _SUBSTANTIVE_HINT = re.compile(
     r"\b("
     r"refund|billing|payment|charge|invoice|order|ship|track|cancel|subscription|"
     r"password|login|account|error|bug|broken|not\s+working|how\s+do\s+i|why\s+is|"
-    r"where\s+(is|can|do)|when\s+(does|will|can)|price|cost|policy|warranty|"
+    r"where\s+(is|can|do)|when\s+(does|will|can)|how\s+(much|many|long)|price|cost|policy|warranty|"
     r"ticket|ban|mute|role|discord|nitro|robux|discount|coupon|promo|panel|enabled|"
     r"help\s+with|support|issue|problem|upgrade|download|install|return|deliver|"
     r"hours|verify|appeal|lost|wrong|scam|hack|staff|admin|phone|address|"
@@ -99,6 +99,11 @@ async def classify_relay_intent(text: str) -> IntentKind:
 
     if _heuristic_substantive(t):
         logger.info("intent_classifier", path="heuristic_substantive", len=len(t))
+        return "substantive"
+
+    # Questions in ticket channels are almost always substantive — skip LLM classify.
+    if "?" in t or "¿" in t:
+        logger.info("intent_classifier", path="question_mark_substantive", len=len(t))
         return "substantive"
 
     generic = await _llm_generic_classify(t)

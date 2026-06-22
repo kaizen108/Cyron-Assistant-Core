@@ -6,7 +6,8 @@ import discord
 from discord import ui
 
 from bot.utils.http_client import get_client
-from bot.utils.placeholders import resolve_placeholders
+from bot.utils.placeholders import resolve_placeholders, build_channel_name
+from bot.utils.ticket_registry import register_ticket_channel
 from bot.utils.support_hours import is_support_open
 from bot.utils.ticket_logger import log_ticket_event
 
@@ -124,8 +125,7 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
     # Max open tickets check
     max_tickets = panel.get("max_open_tickets_per_user", 1)
     open_tickets = await client.get_open_tickets_by_user(str(guild.id), str(member.id))
-    # Filter to this panel
-    panel_open = [t for t in open_tickets]
+    panel_open = [t for t in open_tickets if t.get("panel_id") == panel_id]
     if len(panel_open) >= max_tickets:
         # Find existing channel
         existing_channel_id = panel_open[0].get("channel_id") if panel_open else None
@@ -195,22 +195,21 @@ async def create_ticket_channel(
     # Get next ticket number
     ticket_number = await client.next_ticket_number(str(guild.id))
 
-    # Resolve channel name
-    fmt = panel.get("channel_name_format") or "{panel.name}-{ticket.number}"
-    ctx = {
-        "panel_name": panel["name"].lower().replace(" ", "-"),
-        "creator_username": member.name.lower(),
-        "ticket_number": str(ticket_number).zfill(4),
+    # Resolve channel name via placeholder system
+    ticket_number_str = str(ticket_number).zfill(4)
+    placeholder_ctx = {
+        "creator_mention": member.mention,
+        "creator_username": member.name,
+        "ticket_number": ticket_number_str,
+        "channel_mention": "",
+        "panel_name": panel["name"],
+        "panel_name_slug": panel["name"].lower().replace(" ", "-"),
         "guild_name": guild.name,
     }
-    channel_name = fmt
-    for k, v in {
-        "{panel.name}": ctx["panel_name"],
-        "{ticket.creator.username}": ctx["creator_username"],
-        "{ticket.number}": ctx["ticket_number"],
-    }.items():
-        channel_name = channel_name.replace(k, v)
-    channel_name = channel_name[:100]
+    channel_name = build_channel_name(
+        panel.get("channel_name_format") or "{panel.name}-{ticket.number}",
+        placeholder_ctx,
+    )
 
     # Find category
     category_name = panel.get("ticket_category_name") or "Tickets"
@@ -263,16 +262,10 @@ async def create_ticket_channel(
         channel_name=channel_name,
         form_answers=form_answers,
     )
+    register_ticket_channel(ticket_channel.id, panel["id"])
 
     # Build welcome embed
-    placeholder_ctx = {
-        "creator_mention": member.mention,
-        "creator_username": member.name,
-        "ticket_number": str(ticket_number).zfill(4),
-        "channel_mention": ticket_channel.mention,
-        "panel_name": panel["name"],
-        "guild_name": guild.name,
-    }
+    placeholder_ctx["channel_mention"] = ticket_channel.mention
 
     welcome_desc = resolve_placeholders(
         panel.get("welcome_embed_description") or

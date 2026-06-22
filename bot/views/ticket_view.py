@@ -93,6 +93,25 @@ def parse_modal_custom_id(custom_id: str) -> tuple[str, int] | None:
         return None
 
 
+async def _fetch_ticket_row(guild_id: int, channel_id: int) -> dict | None:
+    from bot.utils.http_client import get_client
+
+    try:
+        return await get_client().get_ticket(str(guild_id), str(channel_id))
+    except Exception:
+        return None
+
+
+async def _ticket_creator_id(guild_id: int, channel_id: int) -> int | None:
+    row = await _fetch_ticket_row(guild_id, channel_id)
+    if row and row.get("user_id") is not None:
+        try:
+            return int(row["user_id"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _resolve_member_from_input(guild: discord.Guild, value: str) -> discord.Member | None:
     """Resolve member from 'User ID' or '<@123>'-style mention."""
     value = (value or "").strip()
@@ -120,6 +139,7 @@ async def _do_close_ticket(
     """Close ticket: notify backend, send close message, delete channel."""
     from bot.utils.http_client import get_client
     from bot.utils.ticket_logger import log_ticket_event
+    from bot.utils.ticket_registry import clear_ticket_channel
 
     channel = interaction.guild and interaction.client.get_channel(channel_id)
     if not channel or not isinstance(channel, discord.TextChannel):
@@ -137,6 +157,8 @@ async def _do_close_ticket(
         )
     except Exception as e:
         logger.warning("Could not update ticket status in backend: %s", e)
+
+    clear_ticket_channel(channel_id)
 
     try:
         close_msg = f"Ticket closed by {closed_by.mention}."
@@ -408,8 +430,18 @@ async def handle_ticket_interaction(
 
     # --- Close: show confirmation modal ---
     if action == "close":
-        is_creator = channel.name == f"ticket-{member.id}"
-        if not (has_support or can_manage or is_creator):
+        creator_id = await _ticket_creator_id(guild.id, channel_id)
+        is_creator = creator_id is not None and member.id == creator_id
+        users_can_close = True
+        ticket_row = await _fetch_ticket_row(guild.id, channel_id)
+        if ticket_row and ticket_row.get("panel_id"):
+            from bot.utils.http_client import get_client
+            panel = await get_client().get_panel(
+                str(guild.id), ticket_row["panel_id"]
+            )
+            if panel is not None:
+                users_can_close = panel.get("users_can_close", False)
+        if not (has_support or can_manage or (is_creator and users_can_close)):
             await interaction.response.send_message(
                 "Only support staff or the ticket creator can close this ticket.",
                 ephemeral=True,
@@ -513,12 +545,7 @@ async def handle_ticket_interaction(
             file = discord.File(buf, filename=f"transcript-{channel.name}.txt")
 
             # Send to ticket creator (DM)
-            creator_id: int | None = None
-            if channel.name.startswith("ticket-"):
-                try:
-                    creator_id = int(channel.name.replace("ticket-", ""))
-                except ValueError:
-                    pass
+            creator_id = await _ticket_creator_id(guild.id, channel_id)
             sent_creator = False
             if creator_id:
                 creator = guild.get_member(creator_id)

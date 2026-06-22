@@ -402,9 +402,12 @@ async def send_panel_to_channel(
     body: PublishPanelPayload,
     _: None = Depends(require_bot_api_key),
     session: AsyncSession = Depends(get_session),
+    redis: Redis = Depends(get_redis),
 ) -> dict:
-    """Instruct the bot to send a panel embed to a specific channel."""
+    """Queue a panel send for the bot (same Redis queue as dashboard send)."""
+    import json
     import uuid as _uuid
+
     try:
         gid = int(guild_id)
         pid = _uuid.UUID(panel_id)
@@ -418,13 +421,13 @@ async def send_panel_to_channel(
     if not panel:
         raise HTTPException(status_code=404, detail="Panel not found")
 
-    # Signal via a Redis pub/sub or just return ok — the bot will pick it up
-    # For simplicity store a pending send in Redis
-    from backend.dependencies import get_redis as _get_redis
-    # We can't get bot instance here, so store in Redis and bot polls it
-    # Better: use a simple in-process approach via the bot's aiohttp server
-    # For now return ok and the bot_internal endpoint handles it
-    return {"status": "ok", "guild_id": gid, "panel_id": str(pid), "channel_id": body.channel_id}
+    task = {
+        "guild_id": gid,
+        "panel_id": str(pid),
+        "channel_id": body.channel_id,
+    }
+    await redis.lpush("bot:pending_panel_sends", json.dumps(task))
+    return {"status": "queued", **task}
 
 
 @router.get("/guilds/{guild_id}/panels/{panel_id}/public")
@@ -454,6 +457,7 @@ async def get_panel_public(
         "id": str(panel.id),
         "guild_id": panel.guild_id,
         "name": panel.name,
+        "ai_context_id": str(panel.ai_context_id) if panel.ai_context_id else None,
         "is_enabled": panel.is_enabled,
         "ticket_category_name": panel.ticket_category_name,
         "button_text": panel.button_text,
@@ -509,10 +513,13 @@ async def get_panel_public(
 async def get_open_tickets_by_user(
     guild_id: str,
     user_id: str | None = Query(default=None),
+    panel_id: str | None = Query(default=None),
     _: None = Depends(require_bot_api_key),
     session: AsyncSession = Depends(get_session),
 ) -> list:
-    """Get open tickets, optionally filtered by user_id."""
+    """Get open tickets, optionally filtered by user_id and/or panel_id."""
+    import uuid as _uuid
+
     try:
         gid = int(guild_id)
     except ValueError:
@@ -524,10 +531,26 @@ async def get_open_tickets_by_user(
             stmt = stmt.where(Ticket.user_id == int(user_id))
         except ValueError:
             pass
+    if panel_id:
+        try:
+            pid = _uuid.UUID(panel_id)
+            stmt = stmt.where(Ticket.panel_id == pid)
+        except ValueError:
+            pass
 
     result = await session.execute(stmt)
     tickets = result.scalars().all()
-    return [{"id": str(t.id), "channel_id": t.channel_id, "user_id": t.user_id} for t in tickets]
+    return [
+        {
+            "id": str(t.id),
+            "channel_id": t.channel_id,
+            "user_id": t.user_id,
+            "panel_id": str(t.panel_id) if t.panel_id else None,
+            "ticket_number": t.ticket_number,
+            "channel_name": t.channel_name,
+        }
+        for t in tickets
+    ]
 
 
 @router.get("/tickets/stale")

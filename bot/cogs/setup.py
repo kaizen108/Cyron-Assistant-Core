@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bot.utils.http_client import get_client
-from bot.views.panel_view import PanelView, build_panel_embed, handle_panel_button
+from bot.views.panel_view import PanelView, build_panel_embed
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,13 @@ class SetupCog(commands.Cog):
                 await interaction.response.send_message("❌ An error occurred during setup.", ephemeral=True)
 
     @app_commands.command(name="sendpanel", description="Send a ticket panel in this channel")
+    @app_commands.describe(panel_id="Panel UUID (optional — pick from a menu if omitted)")
     @app_commands.checks.has_permissions(administrator=True)
-    async def send_panel(self, interaction: discord.Interaction) -> None:
+    async def send_panel(
+        self,
+        interaction: discord.Interaction,
+        panel_id: str | None = None,
+    ) -> None:
         if not interaction.guild:
             await interaction.response.send_message("Server only.", ephemeral=True)
             return
@@ -49,6 +54,11 @@ class SetupCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         client = get_client()
+
+        if panel_id:
+            await self._send_panel_embed(interaction, panel_id.strip())
+            return
+
         panels = await client.get_panels(str(interaction.guild.id))
 
         if not panels:
@@ -97,15 +107,6 @@ class SetupCog(commands.Cog):
             message_id=msg.id,
         )
         await interaction.followup.send("✅ Panel sent!", ephemeral=True)
-
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction) -> None:
-        """Route panel_open: button clicks."""
-        if interaction.type != discord.InteractionType.component:
-            return
-        custom_id = (interaction.data or {}).get("custom_id", "")
-        if custom_id.startswith("panel_open:"):
-            await handle_panel_button(interaction)
 
 
 async def setup(bot: commands.Bot) -> None:

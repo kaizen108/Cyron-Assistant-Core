@@ -298,7 +298,7 @@ async def get_support_reply_without_kb_chunks(
         response = await acompletion(
             model=config.openai_model,
             messages=messages,
-            max_tokens=min(350, config.openai_max_tokens),
+            max_tokens=min(220, config.openai_max_tokens),
             temperature=0.36,
             api_key=api_key,
         )
