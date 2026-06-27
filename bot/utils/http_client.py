@@ -192,6 +192,20 @@ class BackendClient:
         except Exception as e:
             logger.warning("set_ticket_priority failed: %s", e)
 
+    async def set_ticket_handoff(self, guild_id: str, channel_id: str | int, human_handoff: bool) -> None:
+        url = f"{self.base_url}/internal/bot/guilds/{guild_id}/tickets/{channel_id}/handoff"
+        session = await self._get_session()
+        try:
+            async with session.post(
+                url,
+                json={"human_handoff": human_handoff},
+                headers=self._bot_headers,
+            ) as r:
+                if r.status not in (200, 404):
+                    logger.warning("set_ticket_handoff returned %s", r.status)
+        except Exception as e:
+            logger.warning("set_ticket_handoff failed: %s", e)
+
     async def publish_panel(self, guild_id: str, panel_id: str, channel_id: int, message_id: int) -> None:
         url = f"{self.base_url}/internal/bot/guilds/{guild_id}/panels/{panel_id}/publish"
         session = await self._get_session()

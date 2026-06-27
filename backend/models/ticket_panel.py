@@ -22,6 +22,7 @@ class TicketPanel(Base):
     button_emoji: Mapped[str | None] = mapped_column(String(32), nullable=True)
     welcome_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_context_id: Mapped[uuid.UUID | None] = mapped_column(PGUUID(as_uuid=True), ForeignKey("ai_contexts.id"), nullable=True)
+    ai_auto_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     # General

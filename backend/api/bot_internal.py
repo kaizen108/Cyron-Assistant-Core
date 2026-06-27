@@ -149,6 +149,7 @@ async def get_ticket_for_channel(
         "user_id": ticket.user_id,
         "claimed_by_user_id": ticket.claimed_by_user_id,
         "priority": ticket.priority,
+        "human_handoff": ticket.human_handoff,
     }
 
 
@@ -339,6 +340,34 @@ async def set_priority(
     return {"ticket_id": str(ticket.id), "priority": body.priority}
 
 
+class HandoffPayload(BaseModel):
+    human_handoff: bool
+
+
+@router.post("/guilds/{guild_id}/tickets/{channel_id}/handoff")
+async def set_ticket_handoff(
+    guild_id: str,
+    channel_id: str,
+    body: HandoffPayload,
+    _: None = Depends(require_bot_api_key),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Set or clear human handoff on a ticket (blocks AI auto-reply when True)."""
+    try:
+        gid = int(guild_id)
+        cid = int(channel_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ids")
+
+    ticket = await get_ticket_by_channel(session, gid, cid)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    ticket.human_handoff = body.human_handoff
+    await session.flush()
+    return {"ticket_id": str(ticket.id), "human_handoff": ticket.human_handoff}
+
+
 class PublishPanelPayload(BaseModel):
     channel_id: int
     message_id: int
@@ -458,6 +487,7 @@ async def get_panel_public(
         "guild_id": panel.guild_id,
         "name": panel.name,
         "ai_context_id": str(panel.ai_context_id) if panel.ai_context_id else None,
+        "ai_auto_reply": panel.ai_auto_reply,
         "is_enabled": panel.is_enabled,
         "ticket_category_name": panel.ticket_category_name,
         "button_text": panel.button_text,

@@ -61,6 +61,37 @@ class TicketCommandsCog(commands.Cog):
         self.autoclose_task.cancel()
 
     ticket_group = app_commands.Group(name="ticket", description="Ticket management commands")
+    ai_group = app_commands.Group(name="ai", description="AI auto-reply controls", parent=ticket_group)
+
+    @ai_group.command(name="resume", description="Resume AI auto-reply on this ticket")
+    async def ticket_ai_resume(self, interaction: discord.Interaction) -> None:
+        if not interaction.guild or not isinstance(interaction.channel, discord.TextChannel):
+            await interaction.response.send_message("This command must be used in a ticket channel.", ephemeral=True)
+            return
+
+        if not await _has_support(
+            interaction.user,
+            str(interaction.guild.id),
+            str(interaction.channel.id),
+        ):
+            await interaction.response.send_message("Support only.", ephemeral=True)
+            return
+
+        ticket = await _get_ticket_channel_data(str(interaction.guild.id), str(interaction.channel.id))
+        if not ticket:
+            await interaction.response.send_message("Not a registered ticket.", ephemeral=True)
+            return
+
+        try:
+            await get_client().set_ticket_handoff(
+                str(interaction.guild.id),
+                str(interaction.channel.id),
+                False,
+            )
+        except Exception as e:
+            logger.warning("ticket ai resume handoff clear failed: %s", e)
+
+        await interaction.response.send_message("AI auto-reply resumed.")
 
     @ticket_group.command(name="close", description="Close this ticket")
     @app_commands.describe(reason="Reason for closing")

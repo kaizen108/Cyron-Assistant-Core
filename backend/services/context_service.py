@@ -102,6 +102,41 @@ async def delete_context(session: AsyncSession, context_id: uuid.UUID, guild_id:
     return True
 
 
+async def sync_context_panel_links(
+    session: AsyncSession,
+    guild_id: int,
+    context_id: uuid.UUID,
+    panel_ids: list[uuid.UUID],
+) -> None:
+    """Link eligible panels to a context; unlink panels no longer selected."""
+    from backend.models.ticket_panel import TicketPanel
+
+    eligible_result = await session.execute(
+        select(TicketPanel).where(
+            TicketPanel.guild_id == guild_id,
+            TicketPanel.is_enabled == True,
+            TicketPanel.ai_auto_reply == True,
+        )
+    )
+    eligible = {p.id: p for p in eligible_result.scalars().all()}
+    selected = {pid for pid in panel_ids if pid in eligible}
+
+    linked_result = await session.execute(
+        select(TicketPanel).where(
+            TicketPanel.guild_id == guild_id,
+            TicketPanel.ai_context_id == context_id,
+        )
+    )
+    for panel in linked_result.scalars().all():
+        if panel.id not in selected:
+            panel.ai_context_id = None
+
+    for pid in selected:
+        eligible[pid].ai_context_id = context_id
+
+    await session.flush()
+
+
 async def bump_context_version(session: AsyncSession, context_id: uuid.UUID) -> int:
     """Increment context_version. Old cache keys become unreachable automatically."""
     result = await session.execute(

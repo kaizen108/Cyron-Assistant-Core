@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,6 +30,7 @@ class Ticket(Base):
     close_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     rating_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    human_handoff: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=datetime.utcnow)
 
     __table_args__ = (

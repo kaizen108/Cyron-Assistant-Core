@@ -22,6 +22,7 @@ class PanelIn(BaseModel):
     button_emoji: str | None = None
     welcome_message: str | None = None
     ai_context_id: uuid.UUID | None = None
+    ai_auto_reply: bool = False
     # General
     is_enabled: bool = True
     support_role_ids: list | None = None
@@ -92,6 +93,7 @@ class PanelOut(BaseModel):
     button_emoji: str | None
     welcome_message: str | None
     ai_context_id: uuid.UUID | None
+    ai_auto_reply: bool
     is_enabled: bool
     support_role_ids: Any
     overflow_category_ids: Any
@@ -164,6 +166,31 @@ async def list_panels(
 ):
     result = await session.execute(
         select(TicketPanel).where(TicketPanel.guild_id == guild_id).order_by(TicketPanel.created_at)
+    )
+    return list(result.scalars().all())
+
+
+class AiEnabledPanelOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    ai_context_id: uuid.UUID | None = None
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/ai-enabled", response_model=list[AiEnabledPanelOut])
+async def list_ai_enabled_panels(
+    guild_id: int = Depends(require_guild_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Panels eligible for AI auto-reply linking (enabled + ai_auto_reply on)."""
+    result = await session.execute(
+        select(TicketPanel).where(
+            TicketPanel.guild_id == guild_id,
+            TicketPanel.is_enabled == True,
+            TicketPanel.ai_auto_reply == True,
+        ).order_by(TicketPanel.created_at)
     )
     return list(result.scalars().all())
 

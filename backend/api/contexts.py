@@ -9,6 +9,7 @@ from backend.db.session import get_session
 from backend.dependencies import require_guild_admin
 from backend.services.context_service import (
     create_context, delete_context, get_context, list_contexts, update_context,
+    sync_context_panel_links,
 )
 
 router = APIRouter(prefix="/guilds/{guild_id}/contexts", tags=["contexts"])
@@ -18,6 +19,7 @@ class ContextIn(BaseModel):
     name: str
     instructions: str | None = None
     general_info: str | None = None
+    linked_panel_ids: list[uuid.UUID] | None = None
 
 
 class ContextOut(BaseModel):
@@ -68,6 +70,8 @@ async def update_guild_context(
     ctx = await update_context(session, context_id, guild_id, name=body.name, instructions=body.instructions, general_info=body.general_info)
     if not ctx:
         raise HTTPException(status_code=404, detail="Context not found")
+    if body.linked_panel_ids is not None:
+        await sync_context_panel_links(session, guild_id, context_id, body.linked_panel_ids)
     return ctx
 
 
