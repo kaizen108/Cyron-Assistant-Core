@@ -8,6 +8,8 @@ from typing import Any
 import discord
 from discord import ui
 
+from bot.utils.support_roles import get_support_role_ids_for_ticket, member_has_support_roles
+
 logger = logging.getLogger(__name__)
 
 PREFIX = "ticket"
@@ -424,8 +426,9 @@ async def handle_ticket_interaction(
         )
         return True
 
-    support_role = discord.utils.get(guild.roles, name="Support")
-    has_support = support_role and support_role in member.roles
+    ticket_row = await _fetch_ticket_row(guild.id, channel_id)
+    support_role_ids = await get_support_role_ids_for_ticket(str(guild.id), ticket_row)
+    has_support = member_has_support_roles(member, support_role_ids)
     can_manage = channel.permissions_for(member).manage_channels
 
     # --- Close: show confirmation modal ---
@@ -433,7 +436,6 @@ async def handle_ticket_interaction(
         creator_id = await _ticket_creator_id(guild.id, channel_id)
         is_creator = creator_id is not None and member.id == creator_id
         users_can_close = True
-        ticket_row = await _fetch_ticket_row(guild.id, channel_id)
         if ticket_row and ticket_row.get("panel_id"):
             from bot.utils.http_client import get_client
             panel = await get_client().get_panel(
@@ -461,14 +463,15 @@ async def handle_ticket_interaction(
             return True
         await interaction.response.defer(ephemeral=False)
         try:
-            # Ensure support role can see the channel (may already be set at creation)
-            if support_role:
-                await channel.set_permissions(
-                    support_role,
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                )
+            for role_id in support_role_ids:
+                role = guild.get_role(int(role_id))
+                if role:
+                    await channel.set_permissions(
+                        role,
+                        view_channel=True,
+                        send_messages=True,
+                        read_message_history=True,
+                    )
             # Find welcome embed message and update footer
             async for msg in channel.history(limit=50, oldest_first=True):
                 if msg.embeds and msg.author == bot.user:

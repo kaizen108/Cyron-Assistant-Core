@@ -63,53 +63,54 @@ class PanelView(ui.View):
         await handle_panel_button(interaction)
 
 
-async def handle_panel_button(interaction: discord.Interaction) -> None:
-    """Full ticket creation flow triggered by panel button click."""
-    custom_id = (interaction.data or {}).get("custom_id", "")
-    if not custom_id.startswith("panel_open:"):
-        return
+async def _send_panel_response(interaction: discord.Interaction, message: str) -> None:
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
 
-    panel_id = custom_id.split(":", 1)[1]
+
+async def open_ticket_for_panel(interaction: discord.Interaction, panel_id: str) -> None:
+    """Start ticket creation for a panel (button click, /new, etc.)."""
     guild = interaction.guild
     member = interaction.user
 
     if not guild or not isinstance(member, discord.Member):
-        await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+        await _send_panel_response(interaction, "This can only be used in a server.")
         return
 
     client = get_client()
-    panel = await client.get_panel(str(guild.id), panel_id)
+    try:
+        panel = await client.get_panel(str(guild.id), panel_id)
+    except Exception as e:
+        logger.warning("get_panel failed for %s: %s", panel_id, e)
+        panel = None
     if not panel:
-        await interaction.response.send_message("Panel not found.", ephemeral=True)
+        await _send_panel_response(interaction, "Panel not found.")
         return
 
     if not panel.get("is_enabled", True):
-        await interaction.response.send_message("This panel is currently disabled.", ephemeral=True)
+        await _send_panel_response(interaction, "This panel is currently disabled.")
         return
 
-    # Support hours check
-    is_open, state = is_support_open(panel)
-    if not is_open:
-        if panel.get("closed_state_logic") == "deny_creation":
-            msg_data = panel.get("msg_closed") or {}
-            msg = msg_data.get("description") or "Support is currently closed. Please try again during support hours."
-            await interaction.response.send_message(msg, ephemeral=True)
-            return
-        # allow_with_warning — continue but warn after creation
+    is_open, _state = is_support_open(panel)
+    if not is_open and panel.get("closed_state_logic") == "deny_creation":
+        msg_data = panel.get("msg_closed") or {}
+        msg = msg_data.get("description") or "Support is currently closed. Please try again during support hours."
+        await _send_panel_response(interaction, msg)
+        return
 
-    # Role checks
     member_role_ids = {r.id for r in member.roles}
     required = panel.get("roles_required") or []
     if required and not any(int(r) in member_role_ids for r in required):
-        await interaction.response.send_message("You don't have the required role to open a ticket.", ephemeral=True)
+        await _send_panel_response(interaction, "You don't have the required role to open a ticket.")
         return
 
     blocked = panel.get("roles_blocked") or []
     if any(int(r) in member_role_ids for r in blocked):
-        await interaction.response.send_message("You are not allowed to open a ticket.", ephemeral=True)
+        await _send_panel_response(interaction, "You are not allowed to open a ticket.")
         return
 
-    # Cooldown check
     cooldown_secs = panel.get("creation_cooldown_seconds", 0)
     if cooldown_secs > 0:
         guild_cooldowns = _cooldowns.setdefault(guild.id, {})
@@ -117,37 +118,41 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
         elapsed = time.time() - last
         if elapsed < cooldown_secs:
             remaining = int(cooldown_secs - elapsed)
-            await interaction.response.send_message(
-                f"Please wait {remaining}s before opening another ticket.", ephemeral=True
+            await _send_panel_response(
+                interaction,
+                f"Please wait {remaining}s before opening another ticket.",
             )
             return
 
-    # Max open tickets check
     max_tickets = panel.get("max_open_tickets_per_user", 1)
-    open_tickets = await client.get_open_tickets_by_user(str(guild.id), str(member.id))
+    try:
+        open_tickets = await client.get_open_tickets_by_user(str(guild.id), str(member.id))
+    except Exception as e:
+        logger.warning("get_open_tickets_by_user failed: %s", e)
+        open_tickets = []
     panel_open = [t for t in open_tickets if t.get("panel_id") == panel_id]
     if len(panel_open) >= max_tickets:
-        # Find existing channel
         existing_channel_id = panel_open[0].get("channel_id") if panel_open else None
         msg = "You already have an open ticket."
         if existing_channel_id:
             ch = guild.get_channel(int(existing_channel_id))
             if ch:
                 msg = f"You already have an open ticket: {ch.mention}"
-        await interaction.response.send_message(msg, ephemeral=True)
+        await _send_panel_response(interaction, msg)
         return
 
-    # Forms check
     if panel.get("forms_enabled") and panel.get("form_questions"):
+        if interaction.response.is_done():
+            await _send_panel_response(interaction, "Please use the panel button to open a ticket with a form.")
+            return
         modal = DynamicTicketModal(panel, member)
         await interaction.response.send_modal(modal)
         return
 
-    # Create ticket directly
-    await interaction.response.defer(ephemeral=True)
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
     await create_ticket_channel(interaction, panel, member, form_answers=None)
 
-    # Out-of-hours warning (after creation)
     if not is_open and panel.get("closed_state_logic") == "allow_with_warning":
         try:
             await interaction.followup.send(
@@ -156,6 +161,16 @@ async def handle_panel_button(interaction: discord.Interaction) -> None:
             )
         except Exception:
             pass
+
+
+async def handle_panel_button(interaction: discord.Interaction) -> None:
+    """Full ticket creation flow triggered by panel button click."""
+    custom_id = (interaction.data or {}).get("custom_id", "")
+    if not custom_id.startswith("panel_open:"):
+        return
+
+    panel_id = custom_id.split(":", 1)[1]
+    await open_ticket_for_panel(interaction, panel_id)
 
 
 class DynamicTicketModal(ui.Modal):
