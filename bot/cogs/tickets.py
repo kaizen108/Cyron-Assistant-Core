@@ -29,7 +29,56 @@ class TicketsCog(commands.Cog):
         self.bot = bot
         self.client = get_client()
 
-    async def _fetch_open_ticket(self, guild_id: str, channel_id: int) -> dict | None:
+    async def _try_register_orphan_ticket(
+        self,
+        message: discord.Message,
+        guild_id: str,
+        channel_id: int,
+    ) -> dict | None:
+        """Register a ticket channel that exists in Discord but not in the DB."""
+        channel = message.channel
+        if not isinstance(channel, discord.TextChannel):
+            return None
+
+        name = channel.name
+        user_id = message.author.id
+
+        if name.startswith("ticket-"):
+            suffix = name.split("ticket-", 1)[1]
+            try:
+                user_id = int(suffix)
+            except ValueError:
+                pass
+        elif channel.category and channel.category.name.lower() == "tickets":
+            pass
+        else:
+            return None
+
+        me = message.guild.me if message.guild else None
+        result = await self.client.open_ticket(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            bot_id=me.id if me else None,
+            channel_name=name,
+        )
+        if not result.get("id"):
+            logger.warning(
+                "orphan ticket registration failed guild=%s channel=%s",
+                guild_id,
+                channel_id,
+            )
+            return None
+
+        logger.info("auto-registered orphan ticket guild=%s channel=%s", guild_id, channel_id)
+        return await self.client.get_ticket(guild_id, str(channel_id))
+
+    async def _fetch_open_ticket(
+        self,
+        guild_id: str,
+        channel_id: int,
+        message: discord.Message | None = None,
+    ) -> dict | None:
         try:
             ticket_data = await self.client.get_ticket(guild_id, str(channel_id))
             if ticket_data and ticket_data.get("status") == "open":
@@ -37,6 +86,17 @@ class TicketsCog(commands.Cog):
                     channel_id, ticket_data.get("panel_id")
                 )
                 return ticket_data
+
+            if message is not None:
+                ticket_data = await self._try_register_orphan_ticket(
+                    message, guild_id, channel_id
+                )
+                if ticket_data and ticket_data.get("status") == "open":
+                    register_ticket_channel(
+                        channel_id, ticket_data.get("panel_id")
+                    )
+                    return ticket_data
+
             return None
         except Exception as exc:
             logger.warning("get_ticket failed for channel %s: %s", channel_id, exc)
@@ -276,8 +336,9 @@ class TicketsCog(commands.Cog):
         channel_id = message.channel.id
 
         # 1. Registered open ticket channel?
-        ticket_data = await self._fetch_open_ticket(guild_id, channel_id)
+        ticket_data = await self._fetch_open_ticket(guild_id, channel_id, message)
         if not ticket_data:
+            logger.debug("no open ticket for channel %s — skipping relay", channel_id)
             return
 
         should_relay, panel, panel_id = await self._resolve_ai_relay(
@@ -328,7 +389,20 @@ class TicketsCog(commands.Cog):
                 e,
                 exc_info=True,
             )
-            if "403" in str(e) or "different bot" in str(e).lower():
+            err = str(e).lower()
+            if "403" in err or "different bot" in err:
+                logger.warning(
+                    "relay blocked for channel %s (ownership): %s",
+                    channel_id,
+                    e,
+                )
+                try:
+                    await message.channel.send(
+                        "This ticket could not be processed (bot ownership mismatch). "
+                        "Please ask staff to run `/ticket ai resume` or open a new ticket."
+                    )
+                except Exception:
+                    pass
                 return
             try:
                 await message.channel.send(

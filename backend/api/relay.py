@@ -12,7 +12,7 @@ from backend.db.session import get_session
 from backend.dependencies import get_redis, require_bot_api_key
 from backend.schemas.relay import PromptContext, RelayRequest, RelayResponse
 from backend.services.guild_service import upsert_guild
-from backend.services.ticket_service import get_ticket, get_or_create_ticket
+from backend.services.ticket_service import get_or_create_ticket
 from backend.services.limit_service import (
     check_and_incr_concurrent,
     decr_concurrent,
@@ -187,18 +187,33 @@ async def relay_message(
             raise HTTPException(status_code=429, detail=msg)
 
         # 3. Get or create ticket (daily ticket limit only for new ticket)
-        ticket = await get_ticket(session, guild_id, channel_id, bot_id=bot_id)
-        if ticket is None:
-            from backend.services.ticket_service import get_ticket_by_channel
-            any_ticket = await get_ticket_by_channel(session, guild_id, channel_id)
-            if any_ticket is not None:
-                raise HTTPException(status_code=403, detail="Ticket channel is owned by a different bot.")
+        from backend.services.ticket_service import get_ticket_by_channel
+
+        existing = await get_ticket_by_channel(session, guild_id, channel_id)
+        if existing is not None:
+            if existing.status != "open":
+                raise HTTPException(status_code=403, detail="Ticket is not open.")
+            if (
+                bot_id is not None
+                and existing.bot_id is not None
+                and existing.bot_id != bot_id
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Ticket channel is owned by a different bot.",
+                )
+            if bot_id is not None and existing.bot_id is None:
+                existing.bot_id = bot_id
+            ticket = existing
+            created = False
+        else:
             allowed, msg = await check_daily_ticket_limit(redis, guild_id, guild.plan, True)
             if not allowed:
                 logger.info("relay_limit_daily_tickets", guild_id=guild_id, plan=guild.plan, detail=msg)
                 raise HTTPException(status_code=429, detail=msg)
-
-        ticket, _ = await get_or_create_ticket(session, guild_id, channel_id, bot_id=bot_id, panel_id=panel_id)
+            ticket, created = await get_or_create_ticket(
+                session, guild_id, channel_id, bot_id=bot_id, panel_id=panel_id
+            )
         await session.flush()
 
         # Resolve AI context from panel (v2) or fall back to guild-wide
