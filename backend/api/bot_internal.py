@@ -138,6 +138,7 @@ async def get_ticket_for_channel(
     ticket = await get_ticket_by_channel(session, gid, cid)
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    human_handoff = getattr(ticket, "human_handoff", False)
     return {
         "id": str(ticket.id),
         "guild_id": ticket.guild_id,
@@ -149,7 +150,7 @@ async def get_ticket_for_channel(
         "user_id": ticket.user_id,
         "claimed_by_user_id": ticket.claimed_by_user_id,
         "priority": ticket.priority,
-        "human_handoff": ticket.human_handoff,
+        "human_handoff": human_handoff,
     }
 
 
@@ -365,7 +366,7 @@ async def set_ticket_handoff(
 
     ticket.human_handoff = body.human_handoff
     await session.flush()
-    return {"ticket_id": str(ticket.id), "human_handoff": ticket.human_handoff}
+    return {"ticket_id": str(ticket.id), "human_handoff": body.human_handoff}
 
 
 class PublishPanelPayload(BaseModel):
@@ -487,7 +488,7 @@ async def get_panel_public(
         "guild_id": panel.guild_id,
         "name": panel.name,
         "ai_context_id": str(panel.ai_context_id) if panel.ai_context_id else None,
-        "ai_auto_reply": panel.ai_auto_reply,
+        "ai_auto_reply": getattr(panel, "ai_auto_reply", False),
         "is_enabled": panel.is_enabled,
         "ticket_category_name": panel.ticket_category_name,
         "button_text": panel.button_text,

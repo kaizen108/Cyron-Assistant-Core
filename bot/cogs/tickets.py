@@ -39,13 +39,70 @@ class TicketsCog(commands.Cog):
                 return ticket_data
             return None
         except Exception as exc:
-            logger.debug("get_ticket failed for channel %s: %s", channel_id, exc)
+            logger.warning("get_ticket failed for channel %s: %s", channel_id, exc)
             return None
+
+    async def _resolve_ai_relay(
+        self,
+        message: discord.Message,
+        ticket_data: dict,
+        guild_id: str,
+        channel_id: int,
+    ) -> tuple[bool, dict | None, str | None]:
+        """
+        Decide whether to relay this message to AI.
+        Returns (should_relay, panel_dict_or_none, panel_id_or_none).
+        """
+        if ticket_data.get("human_handoff", False):
+            logger.debug("ai_skip channel=%s reason=human_handoff", channel_id)
+            return False, None, None
+
+        member = message.author if isinstance(message.author, discord.Member) else None
+        panel_id = ticket_data.get("panel_id")
+
+        # Legacy tickets (/create-ticket) have no panel — use guild-level AI relay.
+        if not panel_id:
+            if member and member_has_support_roles(member, None):
+                try:
+                    await self.client.set_ticket_handoff(guild_id, channel_id, True)
+                except Exception as e:
+                    logger.warning("staff handoff set failed for %s: %s", channel_id, e)
+                logger.debug("ai_skip channel=%s reason=staff_legacy", channel_id)
+                return False, None, None
+            return True, None, None
+
+        try:
+            panel = await self.client.get_panel(guild_id, panel_id)
+        except Exception as e:
+            logger.warning("get_panel failed for AI relay %s: %s", panel_id, e)
+            return False, None, None
+        if not panel:
+            logger.debug("ai_skip channel=%s reason=panel_not_found", channel_id)
+            return False, None, None
+
+        if not panel.get("ai_auto_reply"):
+            logger.debug("ai_skip channel=%s reason=ai_auto_reply_off panel=%s", channel_id, panel_id)
+            return False, None, None
+
+        if not panel.get("ai_context_id"):
+            logger.debug("ai_skip channel=%s reason=no_ai_context panel=%s", channel_id, panel_id)
+            return False, None, None
+
+        support_role_ids = panel.get("support_role_ids") or []
+        if member and member_has_support_roles(member, support_role_ids):
+            try:
+                await self.client.set_ticket_handoff(guild_id, channel_id, True)
+            except Exception as e:
+                logger.warning("staff handoff set failed for %s: %s", channel_id, e)
+            logger.debug("ai_skip channel=%s reason=staff", channel_id)
+            return False, None, None
+
+        return True, panel, panel_id
 
     async def _trigger_human_handoff(
         self,
         message: discord.Message,
-        panel: dict,
+        panel: dict | None,
     ) -> None:
         """Ping support roles and permanently disable AI for this ticket."""
         guild_id = str(message.guild.id)
@@ -56,10 +113,14 @@ class TicketsCog(commands.Cog):
             logger.warning("set_ticket_handoff failed for %s: %s", channel_id, e)
 
         pings: list[str] = []
-        for role_id in panel.get("support_role_ids") or []:
+        for role_id in (panel or {}).get("support_role_ids") or []:
             role = message.guild.get_role(int(role_id))
             if role:
                 pings.append(role.mention)
+        if not pings:
+            support_role = discord.utils.get(message.guild.roles, name="Support")
+            if support_role:
+                pings.append(support_role.mention)
         if pings:
             try:
                 await message.channel.send(" ".join(pings))
@@ -141,6 +202,14 @@ class TicketsCog(commands.Cog):
                 ticket_number=ticket_number,
                 channel_name=ticket_channel_name,
             )
+            opened = await self.client.get_ticket(
+                str(interaction.guild.id), str(ticket_channel.id)
+            )
+            if not opened:
+                logger.error(
+                    "Ticket channel %s created but backend registration failed",
+                    ticket_channel.id,
+                )
             register_ticket_channel(ticket_channel.id, None)
 
             await interaction.response.send_message(
@@ -211,40 +280,11 @@ class TicketsCog(commands.Cog):
         if not ticket_data:
             return
 
-        panel_id = ticket_data.get("panel_id")
-        if not panel_id:
+        should_relay, panel, panel_id = await self._resolve_ai_relay(
+            message, ticket_data, guild_id, channel_id
+        )
+        if not should_relay:
             return
-
-        try:
-            panel = await self.client.get_panel(guild_id, panel_id)
-        except Exception as e:
-            logger.warning("get_panel failed for AI relay %s: %s", panel_id, e)
-            return
-        if not panel:
-            return
-
-        # 2. Panel AI auto-reply enabled?
-        if not panel.get("ai_auto_reply"):
-            return
-
-        # 3. Panel linked to an AI context?
-        if not panel.get("ai_context_id"):
-            return
-
-        # 4. Human handoff active?
-        if ticket_data.get("human_handoff"):
-            return
-
-        member = message.author
-        if isinstance(member, discord.Member):
-            support_role_ids = panel.get("support_role_ids") or []
-            # 5. Staff message → permanent handoff, no AI reply
-            if member_has_support_roles(member, support_role_ids):
-                try:
-                    await self.client.set_ticket_handoff(guild_id, channel_id, True)
-                except Exception as e:
-                    logger.warning("staff handoff set failed for %s: %s", channel_id, e)
-                return
 
         try:
             async with message.channel.typing():
@@ -266,6 +306,12 @@ class TicketsCog(commands.Cog):
                 reply_text = response_data.get("reply", "")
                 if reply_text:
                     await message.channel.send(reply_text)
+                elif not panel_id:
+                    logger.warning(
+                        "relay_empty_reply guild=%s channel=%s (legacy ticket)",
+                        guild_id,
+                        channel_id,
+                    )
 
             logger.info(
                 "relay_ok guild=%s channel=%s panel_id=%s low_confidence=%s",
