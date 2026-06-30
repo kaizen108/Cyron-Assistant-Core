@@ -103,14 +103,12 @@ async def lifespan(app: FastAPI):
     await _connect_with_retries(log, "db", max_attempts=10, interval=2.0, connect_fn=connect_db)
     log.info("db_migrations_applied")
 
-    # Warm up sentence-transformer model at startup so first knowledge insert
-    # does not block for 30-60s during lazy model load.
-    try:
-        await asyncio.to_thread(warmup_embeddings)
-        log.info("embeddings_warmed")
-    except Exception as e:
-        # Best-effort optimization only; do not block API startup.
-        log.warning("embeddings_warmup_failed", error=str(e))
+    async def _warmup_embeddings_background() -> None:
+        try:
+            await asyncio.to_thread(warmup_embeddings)
+            log.info("embeddings_warmed")
+        except Exception as e:
+            log.warning("embeddings_warmup_failed", error=str(e))
 
     # Scheduler for daily/monthly resets
     scheduler = AsyncIOScheduler()
@@ -134,6 +132,9 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     app.state.scheduler = scheduler
     log.info("scheduler_started")
+
+    # Do not block HTTP startup on HuggingFace model download.
+    asyncio.create_task(_warmup_embeddings_background())
 
     yield
 

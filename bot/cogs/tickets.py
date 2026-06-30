@@ -6,7 +6,7 @@ from discord import app_commands, ChannelType, PermissionOverwrite
 from discord.ext import commands
 
 from bot.utils.http_client import get_client
-from bot.utils.support_roles import member_has_support_roles
+from bot.utils.support_roles import member_is_ai_handoff_staff
 from bot.utils.ticket_registry import (
     register_ticket_channel,
 )
@@ -114,7 +114,7 @@ class TicketsCog(commands.Cog):
         Returns (should_relay, panel_dict_or_none, panel_id_or_none).
         """
         if ticket_data.get("human_handoff", False):
-            logger.debug("ai_skip channel=%s reason=human_handoff", channel_id)
+            logger.info("ai_skip channel=%s reason=human_handoff", channel_id)
             return False, None, None
 
         member = message.author if isinstance(message.author, discord.Member) else None
@@ -122,12 +122,12 @@ class TicketsCog(commands.Cog):
 
         # Legacy tickets (/create-ticket) have no panel — use guild-level AI relay.
         if not panel_id:
-            if member and member_has_support_roles(member, None):
+            if member and member_is_ai_handoff_staff(member, None):
                 try:
                     await self.client.set_ticket_handoff(guild_id, channel_id, True)
                 except Exception as e:
                     logger.warning("staff handoff set failed for %s: %s", channel_id, e)
-                logger.debug("ai_skip channel=%s reason=staff_legacy", channel_id)
+                logger.info("ai_skip channel=%s reason=staff_legacy", channel_id)
                 return False, None, None
             return True, None, None
 
@@ -141,20 +141,20 @@ class TicketsCog(commands.Cog):
             return False, None, None
 
         if not panel.get("ai_auto_reply"):
-            logger.debug("ai_skip channel=%s reason=ai_auto_reply_off panel=%s", channel_id, panel_id)
+            logger.info("ai_skip channel=%s reason=ai_auto_reply_off panel=%s", channel_id, panel_id)
             return False, None, None
 
         if not panel.get("ai_context_id"):
-            logger.debug("ai_skip channel=%s reason=no_ai_context panel=%s", channel_id, panel_id)
+            logger.info("ai_skip channel=%s reason=no_ai_context panel=%s", channel_id, panel_id)
             return False, None, None
 
         support_role_ids = panel.get("support_role_ids") or []
-        if member and member_has_support_roles(member, support_role_ids):
+        if member and member_is_ai_handoff_staff(member, support_role_ids):
             try:
                 await self.client.set_ticket_handoff(guild_id, channel_id, True)
             except Exception as e:
                 logger.warning("staff handoff set failed for %s: %s", channel_id, e)
-            logger.debug("ai_skip channel=%s reason=staff", channel_id)
+            logger.info("ai_skip channel=%s reason=staff", channel_id)
             return False, None, None
 
         return True, panel, panel_id
@@ -335,10 +335,17 @@ class TicketsCog(commands.Cog):
         guild_id = str(message.guild.id)
         channel_id = message.channel.id
 
+        logger.info(
+            "ticket_message guild=%s channel=%s user=%s",
+            guild_id,
+            channel_id,
+            message.author.id,
+        )
+
         # 1. Registered open ticket channel?
         ticket_data = await self._fetch_open_ticket(guild_id, channel_id, message)
         if not ticket_data:
-            logger.debug("no open ticket for channel %s — skipping relay", channel_id)
+            logger.info("no open ticket for channel %s — skipping relay", channel_id)
             return
 
         should_relay, panel, panel_id = await self._resolve_ai_relay(
@@ -346,6 +353,8 @@ class TicketsCog(commands.Cog):
         )
         if not should_relay:
             return
+
+        logger.info("relay_start guild=%s channel=%s panel_id=%s", guild_id, channel_id, panel_id)
 
         try:
             async with message.channel.typing():

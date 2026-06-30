@@ -23,6 +23,17 @@ def member_has_support_roles(
     return any(r.name.lower() == "support" for r in member.roles)
 
 
+def member_is_ai_handoff_staff(
+    member: discord.Member,
+    support_role_ids: list | None,
+) -> bool:
+    """True if member is support staff for AI handoff (not server admins)."""
+    if support_role_ids:
+        member_role_ids = {r.id for r in member.roles}
+        return any(int(rid) in member_role_ids for rid in support_role_ids)
+    return any(r.name.lower() == "support" for r in member.roles)
+
+
 async def get_support_role_ids_for_ticket(
     guild_id: str,
     ticket: dict | None,

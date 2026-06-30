@@ -138,7 +138,10 @@ async def get_ticket_for_channel(
     ticket = await get_ticket_by_channel(session, gid, cid)
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    human_handoff = getattr(ticket, "human_handoff", False)
+    try:
+        human_handoff = bool(ticket.human_handoff)
+    except Exception:
+        human_handoff = False
     return {
         "id": str(ticket.id),
         "guild_id": ticket.guild_id,
@@ -178,6 +181,9 @@ async def open_ticket(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid guild_id")
 
+    await upsert_guild(session, gid)
+    await session.flush()
+
     panel_uuid = None
     if body.panel_id:
         try:
@@ -188,21 +194,28 @@ async def open_ticket(
     # Upsert to handle race conditions
     existing = await get_ticket_by_channel(session, gid, body.channel_id)
     if existing:
+        if existing.status != "open":
+            existing.status = "open"
+            await session.flush()
         return {"id": str(existing.id), "ticket_number": existing.ticket_number}
 
-    ticket = Ticket(
-        guild_id=gid,
-        channel_id=body.channel_id,
-        user_id=body.user_id,
-        panel_id=panel_uuid,
-        bot_id=body.bot_id,
-        ticket_number=body.ticket_number,
-        channel_name=body.channel_name,
-        form_answers=body.form_answers,
-        status="open",
-    )
-    session.add(ticket)
-    await session.flush()
+    try:
+        ticket = Ticket(
+            guild_id=gid,
+            channel_id=body.channel_id,
+            user_id=body.user_id,
+            panel_id=panel_uuid,
+            bot_id=body.bot_id,
+            ticket_number=body.ticket_number,
+            channel_name=body.channel_name,
+            form_answers=body.form_answers,
+            status="open",
+        )
+        session.add(ticket)
+        await session.flush()
+    except Exception as e:
+        logger.error("ticket_open_failed", guild_id=gid, channel_id=body.channel_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to register ticket") from e
     logger.info("ticket_opened", guild_id=gid, ticket_id=str(ticket.id))
     return {"id": str(ticket.id), "ticket_number": ticket.ticket_number}
 
