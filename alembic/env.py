@@ -18,9 +18,16 @@ if str(project_root) not in sys.path:
 
 from backend.config import config as backend_config
 from backend.db.base import Base
-from backend.models import Guild, Knowledge, Ticket, UsageLog, Message  # noqa: F401
-from backend.models.ai_context import AIContext  # noqa: F401
-from backend.models.ticket_panel import TicketPanel  # noqa: F401
+from backend.models import (  # noqa: F401
+    Guild,
+    Knowledge,
+    Ticket,
+    UsageLog,
+    Message,
+    AIContext,
+    TicketPanel,
+    UserGuild,
+)
 
 config = context.config
 if config.config_file_name is not None:
