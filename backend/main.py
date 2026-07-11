@@ -104,10 +104,24 @@ async def lifespan(app: FastAPI):
             alembic_cfg = Config(str(project_root / "alembic.ini"))
             command.upgrade(alembic_cfg, "head")
 
-        await asyncio.to_thread(_migrate)
+        try:
+            await asyncio.to_thread(_migrate)
+        except Exception as exc:
+            err = str(exc)
+            if "Can't locate revision" in err:
+                log.error(
+                    "migration_revision_mismatch",
+                    error=err,
+                    hint=(
+                        "Database alembic_version does not match migration files in this "
+                        "deploy. Redeploy the latest core code, then run: "
+                        "docker compose exec api alembic upgrade head"
+                    ),
+                )
+            raise
 
     await _connect_with_retries(
-        log, "migrations", max_attempts=10, interval=2.0, connect_fn=run_migrations
+        log, "migrations", max_attempts=3, interval=2.0, connect_fn=run_migrations
     )
     log.info("migrations_applied")
 
