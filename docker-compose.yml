@@ -57,7 +57,8 @@ services:
       BACKEND_URL: http://api:8000
       REDIS_URL: redis://redis:6379/0
     depends_on:
-      - api
+      api:
+        condition: service_started
       redis:
         condition: service_healthy
     networks:
