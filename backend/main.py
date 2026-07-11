@@ -98,6 +98,19 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     log.info("redis_connected")
 
+    # Run Alembic migrations before serving traffic (fixes schema drift on deploy).
+    async def run_migrations() -> None:
+        def _migrate() -> None:
+            alembic_cfg = Config(str(project_root / "alembic.ini"))
+            command.upgrade(alembic_cfg, "head")
+
+        await asyncio.to_thread(_migrate)
+
+    await _connect_with_retries(
+        log, "migrations", max_attempts=10, interval=2.0, connect_fn=run_migrations
+    )
+    log.info("migrations_applied")
+
     # Database (retry so we tolerate Postgres not quite ready)
     async def connect_db():
         await init_db()

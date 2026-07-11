@@ -61,16 +61,21 @@ def do_run_migrations(connection: Connection) -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
+    from backend.db.url_utils import postgres_sslmode
+
     url = backend_config.database_url
     # Convert asyncpg URL to psycopg2 sync URL and strip SSL query params
     sync_url = url.replace("postgresql+asyncpg://", "postgresql://")
-    # Remove ?ssl=require and similar params psycopg2 doesn't accept
     if "?" in sync_url:
-        base, params = sync_url.split("?", 1)
-        # Keep only params psycopg2 understands (none of the asyncpg-specific ones)
-        sync_url = base
+        sync_url = sync_url.split("?", 1)[0]
     from sqlalchemy import create_engine
-    connectable = create_engine(sync_url, poolclass=pool.NullPool, connect_args={"sslmode": "require"})
+
+    sslmode = postgres_sslmode(url, backend_config.database_sslmode)
+    connectable = create_engine(
+        sync_url,
+        poolclass=pool.NullPool,
+        connect_args={"sslmode": sslmode},
+    )
 
     with connectable.connect() as connection:
         do_run_migrations(connection)

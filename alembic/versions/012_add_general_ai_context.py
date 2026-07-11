@@ -19,21 +19,33 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'guilds',
-        sa.Column('general_ai_context_id', sa.UUID(), nullable=True),
-    )
-    op.create_foreign_key(
-        'fk_guilds_general_ai_context_id',
-        'guilds',
-        'ai_contexts',
-        ['general_ai_context_id'],
-        ['id'],
-    )
-    op.add_column(
-        'guilds',
-        sa.Column('general_ai_enabled', sa.Boolean(), nullable=False, server_default='true'),
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    guild_columns = {col["name"] for col in inspector.get_columns("guilds")}
+
+    if "general_ai_context_id" not in guild_columns:
+        op.add_column(
+            "guilds",
+            sa.Column("general_ai_context_id", sa.UUID(), nullable=True),
+        )
+        op.create_foreign_key(
+            "fk_guilds_general_ai_context_id",
+            "guilds",
+            "ai_contexts",
+            ["general_ai_context_id"],
+            ["id"],
+        )
+
+    if "general_ai_enabled" not in guild_columns:
+        op.add_column(
+            "guilds",
+            sa.Column(
+                "general_ai_enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default="true",
+            ),
+        )
 
 
 def downgrade() -> None:
