@@ -26,6 +26,7 @@ class BotConfig:
             raise ValueError("BOT_API_KEY environment variable is required")
 
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+        self.redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
     def validate(self) -> bool:
         """Validate that all required configuration is present."""

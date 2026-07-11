@@ -142,22 +142,88 @@ class AITicketBot(commands.Bot):
         if not hasattr(self, "_panel_send_task"):
             self._panel_send_task = asyncio.create_task(self._poll_panel_sends())
 
-    async def _poll_panel_sends(self) -> None:
-        """Poll Redis queue for pending panel send tasks."""
-        import json
-        import aiohttp
+    async def _execute_panel_send(self, task: dict) -> bool:
+        """Send a queued panel embed to Discord. Returns True on success."""
         from bot.views.panel_view import PanelView, build_panel_embed
         from bot.utils.http_client import get_client
 
-        redis_url = __import__('os').environ.get("REDIS_URL", "redis://localhost:6379/0")
-        try:
-            from redis.asyncio import Redis as ARedis
-            redis = ARedis.from_url(redis_url, decode_responses=True)
-        except Exception as e:
-            logger.warning("panel_send_poll: could not connect to Redis: %s", e)
-            return
+        guild_id = int(task["guild_id"])
+        channel_id = int(task["channel_id"])
+        panel_id = task["panel_id"]
+
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            try:
+                guild = await self.fetch_guild(guild_id)
+            except discord.NotFound:
+                logger.warning("panel_send: guild %s not found", guild_id)
+                return False
+
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.NotFound:
+                logger.warning(
+                    "panel_send: channel %s not found in guild %s",
+                    channel_id,
+                    guild_id,
+                )
+                return False
+
+        if not isinstance(channel, discord.TextChannel):
+            logger.warning(
+                "panel_send: channel %s is not a text channel (type=%s)",
+                channel_id,
+                type(channel).__name__,
+            )
+            return False
+
+        client = get_client()
+        panel = await client.get_panel(str(guild_id), panel_id)
+        if not panel:
+            logger.warning(
+                "panel_send: panel %s not found for guild %s", panel_id, guild_id
+            )
+            return False
+
+        embed = build_panel_embed(panel)
+        view = PanelView(panel)
+        msg = await channel.send(embed=embed, view=view)
+        await client.publish_panel(
+            guild_id=str(guild_id),
+            panel_id=panel_id,
+            channel_id=channel.id,
+            message_id=msg.id,
+        )
+        logger.info(
+            "panel_sent guild=%s panel=%s channel=%s message=%s",
+            guild_id,
+            panel_id,
+            channel.id,
+            msg.id,
+        )
+        return True
+
+    async def _poll_panel_sends(self) -> None:
+        """Poll Redis queue for pending panel send tasks."""
+        import json
+        from redis.asyncio import Redis as ARedis
+
+        redis = None
 
         while not self.is_closed():
+            if redis is None:
+                try:
+                    redis = ARedis.from_url(config.redis_url, decode_responses=True)
+                    await redis.ping()
+                    logger.info("panel_send_poll connected to Redis at %s", config.redis_url)
+                except Exception as e:
+                    logger.warning("panel_send_poll: Redis unavailable: %s", e)
+                    redis = None
+                    await asyncio.sleep(5)
+                    continue
+
             try:
                 # On-demand channel sync requests from dashboard
                 for g in self.guilds:
@@ -169,24 +235,36 @@ class AITicketBot(commands.Bot):
                 item = await redis.rpop("bot:pending_panel_sends")
                 if item:
                     task = json.loads(item)
-                    guild = self.get_guild(int(task["guild_id"]))
-                    channel = guild.get_channel(int(task["channel_id"])) if guild else None
-                    if guild and channel and isinstance(channel, discord.TextChannel):
-                        client = get_client()
-                        panel = await client.get_panel(str(task["guild_id"]), task["panel_id"])
-                        if panel:
-                            embed = build_panel_embed(panel)
-                            view = PanelView(panel)
-                            msg = await channel.send(embed=embed, view=view)
-                            await client.publish_panel(
-                                guild_id=str(task["guild_id"]),
-                                panel_id=task["panel_id"],
-                                channel_id=channel.id,
-                                message_id=msg.id,
-                            )
-                            logger.info("panel_sent guild=%s panel=%s channel=%s", task["guild_id"], task["panel_id"], channel.id)
+                    retries = int(task.get("_retries", 0))
+                    try:
+                        ok = await self._execute_panel_send(task)
+                    except discord.Forbidden:
+                        logger.warning(
+                            "panel_send: missing permissions guild=%s channel=%s",
+                            task.get("guild_id"),
+                            task.get("channel_id"),
+                        )
+                        ok = False
+                    except Exception as exc:
+                        logger.warning("panel_send failed: %s", exc, exc_info=True)
+                        ok = False
+
+                    if not ok and retries < 3:
+                        task["_retries"] = retries + 1
+                        await redis.lpush("bot:pending_panel_sends", json.dumps(task))
+                        logger.info(
+                            "panel_send re-queued (attempt %d/3) guild=%s channel=%s",
+                            retries + 1,
+                            task.get("guild_id"),
+                            task.get("channel_id"),
+                        )
             except Exception as e:
                 logger.warning("panel_send_poll error: %s", e)
+                try:
+                    await redis.ping()
+                except Exception:
+                    logger.warning("panel_send_poll: Redis connection lost, reconnecting")
+                    redis = None
             await asyncio.sleep(2)
 
     async def on_guild_join(self, guild: discord.Guild) -> None:

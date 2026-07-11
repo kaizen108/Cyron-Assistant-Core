@@ -55,8 +55,11 @@ services:
       - .env
     environment:
       BACKEND_URL: http://api:8000
+      REDIS_URL: redis://redis:6379/0
     depends_on:
       - api
+      redis:
+        condition: service_healthy
     networks:
       - ai-ticket-network
     restart: unless-stopped

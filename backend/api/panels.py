@@ -251,7 +251,7 @@ async def delete_panel(
 
 
 class SendPanelRequest(BaseModel):
-    channel_id: int
+    channel_id: str  # Discord snowflake — string to preserve precision from JS clients
 
 
 @router.post("/{panel_id}/send")
@@ -264,10 +264,19 @@ async def send_panel_to_channel(
 ):
     """Queue a panel send to a Discord channel via Redis."""
     import json
+
+    channel_id = body.channel_id.strip()
+    if not channel_id.isdigit():
+        raise HTTPException(status_code=400, detail="Invalid channel_id format")
+
     panel = await _get_panel(session, panel_id, guild_id)
     if not panel:
         raise HTTPException(status_code=404, detail="Panel not found")
 
-    task = {"guild_id": guild_id, "panel_id": str(panel_id), "channel_id": body.channel_id}
+    task = {
+        "guild_id": str(guild_id),
+        "panel_id": str(panel_id),
+        "channel_id": channel_id,
+    }
     await redis.lpush("bot:pending_panel_sends", json.dumps(task))
     return {"status": "queued"}
