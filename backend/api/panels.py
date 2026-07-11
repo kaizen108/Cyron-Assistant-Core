@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.session import get_session
 from backend.dependencies import require_guild_admin, get_redis
+from backend.models.guild import Guild
 from backend.models.ticket_panel import TicketPanel
+from backend.services.context_service import ensure_general_rules_context, is_general_rules_context
 
 router = APIRouter(prefix="/guilds/{guild_id}/panels", tags=["panels"])
 
@@ -22,9 +24,9 @@ class PanelIn(BaseModel):
     button_emoji: str | None = None
     welcome_message: str | None = None
     ai_context_id: uuid.UUID | None = None
-    ai_auto_reply: bool = False
     # General
     is_enabled: bool = True
+    ai_auto_reply: bool = False
     support_role_ids: list | None = None
     overflow_category_ids: list | None = None
     threading_mode: bool = False
@@ -93,8 +95,8 @@ class PanelOut(BaseModel):
     button_emoji: str | None
     welcome_message: str | None
     ai_context_id: uuid.UUID | None
-    ai_auto_reply: bool
     is_enabled: bool
+    ai_auto_reply: bool
     support_role_ids: Any
     overflow_category_ids: Any
     threading_mode: bool
@@ -159,6 +161,20 @@ async def _get_panel(session: AsyncSession, panel_id: uuid.UUID, guild_id: int) 
     return result.scalar_one_or_none()
 
 
+async def _validate_panel_ai_context(
+    session: AsyncSession,
+    guild_id: int,
+    ai_context_id: uuid.UUID | None,
+) -> None:
+    if not ai_context_id:
+        return
+    if await is_general_rules_context(session, guild_id, ai_context_id):
+        raise HTTPException(
+            status_code=400,
+            detail="General Rules cannot be linked to a panel. Use the AI tab to select a panel-specific context.",
+        )
+
+
 @router.get("", response_model=list[PanelOut])
 async def list_panels(
     guild_id: int = Depends(require_guild_admin),
@@ -170,37 +186,18 @@ async def list_panels(
     return list(result.scalars().all())
 
 
-class AiEnabledPanelOut(BaseModel):
-    id: uuid.UUID
-    name: str
-    ai_context_id: uuid.UUID | None = None
-
-    class Config:
-        from_attributes = True
-
-
-@router.get("/ai-enabled", response_model=list[AiEnabledPanelOut])
-async def list_ai_enabled_panels(
-    guild_id: int = Depends(require_guild_admin),
-    session: AsyncSession = Depends(get_session),
-):
-    """Panels eligible for AI auto-reply linking (enabled + ai_auto_reply on)."""
-    result = await session.execute(
-        select(TicketPanel).where(
-            TicketPanel.guild_id == guild_id,
-            TicketPanel.is_enabled == True,
-            TicketPanel.ai_auto_reply == True,
-        ).order_by(TicketPanel.created_at)
-    )
-    return list(result.scalars().all())
-
-
 @router.post("", response_model=PanelOut, status_code=201)
 async def create_panel(
     body: PanelIn = Body(...),
     guild_id: int = Depends(require_guild_admin),
     session: AsyncSession = Depends(get_session),
 ):
+    await _validate_panel_ai_context(session, guild_id, body.ai_context_id)
+    if body.ai_auto_reply:
+        guild_result = await session.execute(select(Guild).where(Guild.id == guild_id))
+        guild = guild_result.scalar_one_or_none()
+        if guild:
+            await ensure_general_rules_context(session, guild)
     panel = TicketPanel(guild_id=guild_id, **body.model_dump())
     session.add(panel)
     await session.flush()
@@ -229,6 +226,12 @@ async def update_panel(
     panel = await _get_panel(session, panel_id, guild_id)
     if not panel:
         raise HTTPException(status_code=404, detail="Panel not found")
+    await _validate_panel_ai_context(session, guild_id, body.ai_context_id)
+    if body.ai_auto_reply:
+        guild_result = await session.execute(select(Guild).where(Guild.id == guild_id))
+        guild = guild_result.scalar_one_or_none()
+        if guild:
+            await ensure_general_rules_context(session, guild)
     for k, v in body.model_dump().items():
         setattr(panel, k, v)
     await session.flush()

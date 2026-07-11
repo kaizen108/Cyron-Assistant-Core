@@ -1,7 +1,9 @@
 """Guild ORM model."""
 
+import uuid
 from datetime import datetime
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.db.base import Base
 
@@ -28,6 +30,14 @@ class Guild(Base):
         String(7), nullable=True, default="#00b4ff"
     )
     ticket_counter: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    # General Rules AI context (global layer)
+    general_ai_context_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("ai_contexts.id"), nullable=True
+    )
+    general_ai_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Close settings
     close_embed_title: Mapped[str | None] = mapped_column(String(256), nullable=True, default="Ticket Closed")
     close_embed_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     close_embed_footer: Mapped[str | None] = mapped_column(String(256), nullable=True)

@@ -8,8 +8,6 @@ from typing import Any
 import discord
 from discord import ui
 
-from bot.utils.support_roles import get_support_role_ids_for_ticket, member_has_support_roles
-
 logger = logging.getLogger(__name__)
 
 PREFIX = "ticket"
@@ -95,25 +93,6 @@ def parse_modal_custom_id(custom_id: str) -> tuple[str, int] | None:
         return None
 
 
-async def _fetch_ticket_row(guild_id: int, channel_id: int) -> dict | None:
-    from bot.utils.http_client import get_client
-
-    try:
-        return await get_client().get_ticket(str(guild_id), str(channel_id))
-    except Exception:
-        return None
-
-
-async def _ticket_creator_id(guild_id: int, channel_id: int) -> int | None:
-    row = await _fetch_ticket_row(guild_id, channel_id)
-    if row and row.get("user_id") is not None:
-        try:
-            return int(row["user_id"])
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
 def _resolve_member_from_input(guild: discord.Guild, value: str) -> discord.Member | None:
     """Resolve member from 'User ID' or '<@123>'-style mention."""
     value = (value or "").strip()
@@ -141,7 +120,6 @@ async def _do_close_ticket(
     """Close ticket: notify backend, send close message, delete channel."""
     from bot.utils.http_client import get_client
     from bot.utils.ticket_logger import log_ticket_event
-    from bot.utils.ticket_registry import clear_ticket_channel
 
     channel = interaction.guild and interaction.client.get_channel(channel_id)
     if not channel or not isinstance(channel, discord.TextChannel):
@@ -159,8 +137,6 @@ async def _do_close_ticket(
         )
     except Exception as e:
         logger.warning("Could not update ticket status in backend: %s", e)
-
-    clear_ticket_channel(channel_id)
 
     try:
         close_msg = f"Ticket closed by {closed_by.mention}."
@@ -396,6 +372,10 @@ async def handle_ticket_interaction(
     if interaction.type != discord.InteractionType.component:
         return False
 
+    # Guard: skip if already responded by TicketView's own callbacks
+    if interaction.response.is_done():
+        return False
+
     custom_id = (interaction.data or {}).get("custom_id", "")
     parsed = parse_custom_id(str(custom_id))
     if not parsed:
@@ -426,67 +406,85 @@ async def handle_ticket_interaction(
         )
         return True
 
-    ticket_row = await _fetch_ticket_row(guild.id, channel_id)
-    support_role_ids = await get_support_role_ids_for_ticket(str(guild.id), ticket_row)
-    has_support = member_has_support_roles(member, support_role_ids)
-    can_manage = channel.permissions_for(member).manage_channels
-
-    # --- Close: show confirmation modal ---
+    # --- Close: show confirmation modal (must respond immediately, no defer) ---
     if action == "close":
-        creator_id = await _ticket_creator_id(guild.id, channel_id)
-        is_creator = creator_id is not None and member.id == creator_id
-        users_can_close = True
-        if ticket_row and ticket_row.get("panel_id"):
-            from bot.utils.http_client import get_client
-            panel = await get_client().get_panel(
-                str(guild.id), ticket_row["panel_id"]
-            )
-            if panel is not None:
-                users_can_close = panel.get("users_can_close", False)
-        if not (has_support or can_manage or (is_creator and users_can_close)):
-            await interaction.response.send_message(
-                "Only support staff or the ticket creator can close this ticket.",
-                ephemeral=True,
-            )
-            return True
         modal = CloseConfirmModal(channel_id=channel_id, closed_by=member)
         await interaction.response.send_modal(modal)
         return True
 
+    # --- Add User: show modal ---
+    if action == "add_user":
+        modal = AddUserModal(channel_id=channel_id)
+        await interaction.response.send_modal(modal)
+        return True
+
+    # --- Remove User: show modal ---
+    if action == "remove_user":
+        modal = RemoveUserModal(channel_id=channel_id)
+        await interaction.response.send_modal(modal)
+        return True
+
+    # For remaining actions (claim, transcript), defer first then fetch data
     # --- Claim: add staff to channel + update embed footer ---
     if action == "claim":
-        if not (has_support or can_manage):
-            await interaction.response.send_message(
-                "Only support staff can claim tickets.",
-                ephemeral=True,
-            )
-            return True
         await interaction.response.defer(ephemeral=False)
+
+        # Fetch ticket and panel data AFTER deferring
+        from bot.utils.http_client import get_client
+        client = get_client()
+        ticket_data = None
+        panel = None
         try:
-            for role_id in support_role_ids:
-                role = guild.get_role(int(role_id))
-                if role:
-                    await channel.set_permissions(
-                        role,
-                        view_channel=True,
-                        send_messages=True,
-                        read_message_history=True,
-                    )
+            ticket_data = await client.get_ticket(str(guild.id), str(channel_id))
+            if ticket_data and ticket_data.get("panel_id"):
+                panel = await client.get_panel(str(guild.id), ticket_data["panel_id"])
+        except Exception:
+            pass
+
+        # Check support
+        support_role_ids = (panel.get("support_role_ids") or []) if panel else []
+        has_support = False
+        if member.guild_permissions.manage_channels or member.guild_permissions.administrator:
+            has_support = True
+        elif support_role_ids:
+            member_role_ids = {str(r.id) for r in member.roles}
+            has_support = any(str(rid) in member_role_ids for rid in support_role_ids)
+        else:
+            support_role = discord.utils.get(guild.roles, name="Support")
+            has_support = support_role and support_role in member.roles
+
+        if not has_support:
+            await interaction.followup.send("Only support staff can claim tickets.", ephemeral=True)
+            return True
+
+        try:
+            # Ensure support role can see the channel
+            if support_role_ids:
+                for rid in support_role_ids:
+                    role = guild.get_role(int(rid))
+                    if role:
+                        await channel.set_permissions(role, view_channel=True, send_messages=True, read_message_history=True)
+
             # Find welcome embed message and update footer
             async for msg in channel.history(limit=50, oldest_first=True):
                 if msg.embeds and msg.author == bot.user:
                     emb = msg.embeds[0]
-                    if emb.title == "Support Ticket":
+                    if emb.title and "ticket" in emb.title.lower() or emb.title and "welcome" in emb.title.lower() or emb.title and "support" in emb.title.lower():
                         emb.set_footer(text=f"Claimed by {member.display_name}")
                         if emb.fields:
                             for i, f in enumerate(emb.fields):
                                 if f.name == "Status":
-                                    emb.set_field_at(
-                                        i, name="Status", value="Claimed", inline=True
-                                    )
+                                    emb.set_field_at(i, name="Status", value="Claimed", inline=True)
                                     break
                         await msg.edit(embed=emb)
                         break
+
+            # Notify backend
+            try:
+                await client.claim_ticket(str(guild.id), str(channel_id), str(member.id))
+            except Exception:
+                pass
+
             await interaction.followup.send(
                 f"Ticket claimed by {member.mention}. They will assist you shortly.",
                 ephemeral=False,
@@ -494,34 +492,7 @@ async def handle_ticket_interaction(
             logger.info("Ticket %s claimed by %s", channel_id, member.id)
         except Exception as e:
             logger.exception("Error claiming ticket %s: %s", channel_id, e)
-            await interaction.followup.send(
-                "Ticket claimed, but I couldn't update the embed.",
-                ephemeral=False,
-            )
-        return True
-
-    # --- Add User: show modal ---
-    if action == "add_user":
-        if not (has_support or can_manage):
-            await interaction.response.send_message(
-                "Only support staff can add users to this ticket.",
-                ephemeral=True,
-            )
-            return True
-        modal = AddUserModal(channel_id=channel_id)
-        await interaction.response.send_modal(modal)
-        return True
-
-    # --- Remove User: show modal ---
-    if action == "remove_user":
-        if not (has_support or can_manage):
-            await interaction.response.send_message(
-                "Only support staff can remove users from this ticket.",
-                ephemeral=True,
-            )
-            return True
-        modal = RemoveUserModal(channel_id=channel_id)
-        await interaction.response.send_modal(modal)
+            await interaction.followup.send("Ticket claimed, but I couldn't update the embed.", ephemeral=False)
         return True
 
     # --- Transcript: log messages, send file to creator + admin ---
@@ -547,24 +518,6 @@ async def handle_ticket_interaction(
             buf.seek(0)
             file = discord.File(buf, filename=f"transcript-{channel.name}.txt")
 
-            # Send to ticket creator (DM)
-            creator_id = await _ticket_creator_id(guild.id, channel_id)
-            sent_creator = False
-            if creator_id:
-                creator = guild.get_member(creator_id)
-                if creator:
-                    try:
-                        await creator.send(
-                            f"Transcript for your ticket **#{channel.name}**:",
-                            file=discord.File(
-                                io.BytesIO(content.encode("utf-8")),
-                                filename=f"transcript-{channel.name}.txt",
-                            ),
-                        )
-                        sent_creator = True
-                    except discord.Forbidden:
-                        logger.debug("Could not DM transcript to creator %s", creator_id)
-
             # Send to requester (staff)
             try:
                 await member.send(
@@ -577,7 +530,7 @@ async def handle_ticket_interaction(
             except discord.Forbidden:
                 pass
 
-            # Optional: send to ticket-logs channel
+            # Send to ticket-logs channel
             ticket_logs = discord.utils.get(guild.text_channels, name="ticket-logs")
             if ticket_logs:
                 try:
@@ -586,19 +539,13 @@ async def handle_ticket_interaction(
                         file=file,
                     )
                 except discord.Forbidden:
-                    logger.warning("Could not send transcript to ticket-logs")
+                    pass
 
-            reply = "Transcript generated and sent to your DMs."
-            if sent_creator:
-                reply += " The ticket creator was also sent a copy."
-            await interaction.followup.send(reply, ephemeral=True)
+            await interaction.followup.send("Transcript generated and sent to your DMs.", ephemeral=True)
             logger.info("Transcript generated for ticket %s", channel_id)
         except Exception as e:
             logger.exception("Error generating transcript for %s: %s", channel_id, e)
-            await interaction.followup.send(
-                "Failed to generate transcript.",
-                ephemeral=True,
-            )
+            await interaction.followup.send("Failed to generate transcript.", ephemeral=True)
         return True
 
     return False

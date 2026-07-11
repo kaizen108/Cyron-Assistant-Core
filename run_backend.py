@@ -22,14 +22,14 @@ os.chdir(project_root_str)
 if __name__ == "__main__":
     import uvicorn
     from backend.config import config
-
+    
     uvicorn.run(
         "backend.main:app",
         host=config.host,
         port=config.port,
         reload=config.reload,
-        workers=config.uvicorn_workers if not config.reload else 1,
         proxy_headers=True,
         forwarded_allow_ips="*",
         log_level=config.log_level.lower(),
     )
+

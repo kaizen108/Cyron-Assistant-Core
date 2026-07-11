@@ -12,17 +12,16 @@ logger = logging.getLogger(__name__)
 class BackendClient:
     """Async HTTP client for communicating with the backend API."""
 
-    def __init__(self, base_url: str, timeout: int = 30) -> None:
+    def __init__(self, base_url: str, timeout: int = 10) -> None:
         """
         Initialize the backend client.
 
         Args:
             base_url: Base URL of the backend API
-            timeout: Default request timeout in seconds
+            timeout: Request timeout in seconds
         """
         self.base_url = base_url.rstrip("/")
         self.timeout = aiohttp.ClientTimeout(total=timeout)
-        self.relay_timeout = aiohttp.ClientTimeout(total=120)
         self._session: aiohttp.ClientSession | None = None
         self._bot_headers = {
             "Content-Type": "application/json",
@@ -61,18 +60,9 @@ class BackendClient:
             async with session.get(url, headers=self._bot_headers) as response:
                 if response.status == 200:
                     return await response.json()
-                if response.status != 404:
-                    body = await response.text()
-                    logger.warning(
-                        "get_ticket HTTP %s for %s/%s: %s",
-                        response.status,
-                        guild_id,
-                        channel_id,
-                        body[:200],
-                    )
                 return None
         except Exception as e:
-            logger.warning("Failed to fetch ticket %s/%s: %s", guild_id, channel_id, e)
+            logger.warning(f"Failed to fetch ticket {guild_id}/{channel_id}: {e}")
             return None
 
     async def mark_guild_has_bot(self, guild_id: str, name: str | None = None) -> None:
@@ -157,11 +147,7 @@ class BackendClient:
         session = await self._get_session()
         try:
             async with session.post(url, json=payload, headers=self._bot_headers) as r:
-                if r.status == 200:
-                    return await r.json()
-                body = await r.text()
-                logger.warning("open_ticket HTTP %s for channel %s: %s", r.status, channel_id, body[:200])
-                return {}
+                return await r.json() if r.status == 200 else {}
         except Exception as e:
             logger.warning("open_ticket failed: %s", e)
             return {}
@@ -206,19 +192,16 @@ class BackendClient:
         except Exception as e:
             logger.warning("set_ticket_priority failed: %s", e)
 
-    async def set_ticket_handoff(self, guild_id: str, channel_id: str | int, human_handoff: bool) -> None:
+    async def set_handoff(self, guild_id: str, channel_id: str, handoff: bool) -> None:
+        """Set human_handoff flag for a ticket."""
         url = f"{self.base_url}/internal/bot/guilds/{guild_id}/tickets/{channel_id}/handoff"
         session = await self._get_session()
         try:
-            async with session.post(
-                url,
-                json={"human_handoff": human_handoff},
-                headers=self._bot_headers,
-            ) as r:
+            async with session.post(url, json={"human_handoff": handoff}, headers=self._bot_headers) as r:
                 if r.status not in (200, 404):
-                    logger.warning("set_ticket_handoff returned %s", r.status)
+                    logger.warning("set_handoff returned %s", r.status)
         except Exception as e:
-            logger.warning("set_ticket_handoff failed: %s", e)
+            logger.warning("set_handoff failed: %s", e)
 
     async def publish_panel(self, guild_id: str, panel_id: str, channel_id: int, message_id: int) -> None:
         url = f"{self.base_url}/internal/bot/guilds/{guild_id}/panels/{panel_id}/publish"
@@ -292,7 +275,7 @@ class BackendClient:
                     f"Relaying message to backend (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 async with session.post(
-                    url, json=payload, headers=self._bot_headers, timeout=self.relay_timeout
+                    url, json=payload, headers=self._bot_headers
                 ) as response:
                     if response.status == 200:
                         data = await response.json()

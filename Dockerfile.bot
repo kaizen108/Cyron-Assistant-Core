@@ -22,5 +22,7 @@ RUN uv pip install --system -r requirements.txt
 # Copy entire project
 COPY . .
 
+ENV PYTHONPATH=/app
+
 # Run application
-CMD ["uv", "run", "run_bot.py"]
+CMD ["python", "run_bot.py"]

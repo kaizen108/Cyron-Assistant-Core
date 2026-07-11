@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Literal, TypedDict
 
 from backend.config import MIN_SIMILARITY_THRESHOLD, SIMILARITY_HIGH, SIMILARITY_MODERATE_FLOOR
+from backend.schemas.plans import DEFAULT_SYSTEM_PROMPT
 from backend.schemas.relay import PromptContext
+from backend.models.ai_context import AIContext
 
 RetrievalMode = Literal["none", "moderate", "high"]
 
@@ -20,6 +22,69 @@ STANDARD_TONE = (
     "Warm, natural Discord support tone. Ground facts only in the passages. "
     "Same language as the user ({lang}). Keep it concise."
 )
+
+
+def format_context_content(ctx: AIContext | None) -> str:
+    """Combine instructions and general_info from an AI context."""
+    if not ctx:
+        return ""
+    parts: list[str] = []
+    if ctx.instructions:
+        parts.append(ctx.instructions)
+    if ctx.general_info:
+        parts.append(f"General information:\n{ctx.general_info}")
+    return "\n\n".join(parts)
+
+
+def _legacy_guild_system_prompt(raw: str) -> str:
+    """
+    Legacy guild-wide system_prompt from the Settings tab (pre–Phase 3).
+    Only include when the admin set a custom value — not the default boilerplate.
+    Phase 3 panels rely primarily on General Rules + per-panel context.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text == DEFAULT_SYSTEM_PROMPT.strip():
+        return ""
+    return text
+
+
+def build_effective_system_prompt(
+    *,
+    base_system_prompt: str = "",
+    general_ai_enabled: bool,
+    general_context: AIContext | None,
+    panel_context: AIContext | None,
+) -> str:
+    """
+    Phase 3 merge order:
+    - General Rules + panel context when both exist and general rules are enabled
+    - Panel context only when general rules are disabled
+    - General Rules alone when panel has no linked context
+    """
+    base = _legacy_guild_system_prompt(base_system_prompt)
+    general_rules_content = format_context_content(general_context) if general_ai_enabled else ""
+    panel_specific_content = format_context_content(panel_context)
+
+    if general_ai_enabled and general_rules_content:
+        merged = [p for p in [base, general_rules_content, panel_specific_content] if p]
+        return "\n\n".join(merged)
+
+    merged = [p for p in [base, panel_specific_content] if p]
+    return "\n\n".join(merged)
+
+
+def has_ai_configuration(
+    *,
+    general_ai_enabled: bool,
+    general_context: AIContext | None,
+    panel_context: AIContext | None,
+) -> bool:
+    """True when at least one AI context layer has content to drive replies."""
+    if general_ai_enabled and format_context_content(general_context):
+        return True
+    return bool(format_context_content(panel_context))
 
 
 def _tier_from_similarity(top_similarity: float, has_chunks: bool) -> RetrievalMode:

@@ -16,9 +16,11 @@ class BotConfig:
         if not self.discord_token:
             raise ValueError("DISCORD_TOKEN environment variable is required")
 
-        self.backend_url: str = os.getenv("BACKEND_URL", "http://localhost:8000")
-        # Remove trailing slash if present
-        self.backend_url = self.backend_url.rstrip("/")
+        self.backend_url: str = (
+            os.getenv("BACKEND_URL")
+            or os.getenv("BACKEND_PUBLIC_URL")
+            or "http://localhost:8000"
+        ).rstrip("/")
         self.bot_api_key: str = os.getenv("BOT_API_KEY", "").strip()
         if not self.bot_api_key:
             raise ValueError("BOT_API_KEY environment variable is required")

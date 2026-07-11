@@ -6,38 +6,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Below this vs top retrieved score → low_confidence flag for UI/analytics.
-MIN_SIMILARITY_THRESHOLD: float = 0.55
+MIN_SIMILARITY_THRESHOLD: float = 0.35
 # Strict KB-anchored answers (high similarity).
-SIMILARITY_HIGH: float = 0.60
+SIMILARITY_HIGH: float = 0.55
 # Minimum similarity to inject KB at all (best-effort / moderate band is [floor, high)).
-SIMILARITY_MODERATE_FLOOR: float = 0.28
+SIMILARITY_MODERATE_FLOOR: float = 0.25
 # Minimum score to return candidates from vector search (below → no KB injection).
-MIN_SIMILARITY_RETRIEVAL: float = 0.30
+MIN_SIMILARITY_RETRIEVAL: float = 0.25
 # v2.2 aggressive compact path — trigger more often, earlier.
-COMPACT_STRONG_MATCH: float = 0.62
-COMPACT_HIGH_MATCH: float = 0.55
-COMPACT_EARLY_EXIT_SIM: float = 0.58
+COMPACT_STRONG_MATCH: float = 0.52
+COMPACT_HIGH_MATCH: float = 0.42
+COMPACT_EARLY_EXIT_SIM: float = 0.50
 COMPACT_MAX_QUERY_WORDS: int = 25
 COMPACT_MAX_QUERY_CHARS: int = 180
 # Redis cache for short-query replies (seconds).
 COMPACT_CACHE_TTL_SEC: int = 604_800  # 7 days
-
-
-def _parse_csv_env(name: str, default: str) -> list[str]:
-    """Parse comma-separated env values and strip trailing slashes."""
-    raw = os.getenv(name, default)
-    return [
-        item.strip().rstrip("/")
-        for item in raw.split(",")
-        if item.strip()
-    ]
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class BackendConfig:
@@ -48,8 +31,6 @@ class BackendConfig:
         self.host: str = os.getenv("HOST", "0.0.0.0")
         self.port: int = int(os.getenv("PORT", "8000"))
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
-        self.reload: bool = _env_bool("RELOAD", default=False)
-        self.uvicorn_workers: int = max(1, int(os.getenv("UVICORN_WORKERS", "1")))
         self.database_url: str = os.getenv(
             "DATABASE_URL",
             "postgresql+asyncpg://postgres:postgres@localhost:5432/ai_ticket_assistant",
@@ -77,20 +58,34 @@ class BackendConfig:
         self.auth_jwt_exp_minutes: int = int(
             os.getenv("AUTH_JWT_EXP_MINUTES", "1440")
         )
-        self.frontend_allowed_origins: list[str] = _parse_csv_env(
-            "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
-        )
+        self.frontend_allowed_origins: list[str] = [
+            origin.strip().rstrip("/")
+            for origin in os.getenv(
+                "FRONTEND_ALLOWED_ORIGINS", "http://localhost:5173"
+            ).split(",")
+            if origin.strip()
+        ]
         self.frontend_public_url: str = os.getenv(
-            "FRONTEND_PUBLIC_URL", "http://localhost:5173"
+            "FRONTEND_PUBLIC_URL", self.frontend_allowed_origins[0]
         ).rstrip("/")
-        self.discord_oauth_allowed_redirect_uris: list[str] = _parse_csv_env(
-            "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
-            "http://localhost:5173/auth/callback",
-        )
+        self.discord_oauth_allowed_redirect_uris: list[str] = [
+            uri.strip().rstrip("/")
+            for uri in os.getenv(
+                "DISCORD_OAUTH_ALLOWED_REDIRECT_URIS",
+                "http://localhost:5173/auth/callback",
+            ).split(",")
+            if uri.strip()
+        ]
         self.backend_public_url: str = os.getenv(
             "BACKEND_PUBLIC_URL", f"http://{self.host}:{self.port}"
         ).rstrip("/")
+        self.reload: bool = os.getenv("RELOAD", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
 
 
 # Global config instance
 config = BackendConfig()
+

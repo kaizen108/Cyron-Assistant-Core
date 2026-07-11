@@ -1,0 +1,4 @@
+# Replace api.cyronticket.com with your API subdomain.
+api.cyronticket.com {
+    reverse_proxy localhost:8000
+}

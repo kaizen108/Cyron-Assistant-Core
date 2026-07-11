@@ -7,25 +7,25 @@ services:
       POSTGRES_DB: ai_ticket_assistant
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ai-ticket-network
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d ai_ticket_assistant"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks:
-      - ai-ticket-network
-    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
     networks:
       - ai-ticket-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   api:
     build:
@@ -33,19 +33,16 @@ services:
       dockerfile: Dockerfile.backend
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/ai_ticket_assistant
+      REDIS_URL: redis://redis:6379/0
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 15s
-      timeout: 10s
-      retries: 8
-      start_period: 30s
     networks:
       - ai-ticket-network
     restart: unless-stopped
@@ -59,15 +56,14 @@ services:
     environment:
       BACKEND_URL: http://api:8000
     depends_on:
-      api:
-        condition: service_healthy
+      - api
     networks:
       - ai-ticket-network
     restart: unless-stopped
 
-volumes:
-  postgres_data:
-
 networks:
   ai-ticket-network:
     driver: bridge
+
+volumes:
+  postgres_data:

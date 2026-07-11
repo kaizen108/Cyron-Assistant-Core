@@ -1,5 +1,6 @@
 """Alembic async environment."""
 
+import asyncio
 from logging.config import fileConfig
 
 from sqlalchemy import create_engine, pool
@@ -29,34 +30,6 @@ target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", backend_config.database_url.replace("+asyncpg", ""))
 
 
-def _sync_url_and_connect_args(url: str) -> tuple[str, dict]:
-    """Convert async URL to psycopg2 sync URL and choose SSL mode."""
-    sync_url = url.replace("postgresql+asyncpg://", "postgresql://")
-    connect_args: dict = {}
-    ssl_required = False
-
-    if "?" in sync_url:
-        base, params = sync_url.split("?", 1)
-        sync_url = base
-        lowered = params.lower()
-        if "ssl=require" in lowered or "sslmode=require" in lowered:
-            ssl_required = True
-
-    host_part = sync_url.split("@")[-1] if "@" in sync_url else sync_url
-    if any(
-        marker in host_part
-        for marker in ("neon.tech", "amazonaws.com", "supabase.co", "render.com")
-    ):
-        ssl_required = True
-
-    if ssl_required:
-        connect_args["sslmode"] = "require"
-    elif any(marker in host_part for marker in ("localhost", "127.0.0.1", "postgres:")):
-        connect_args["sslmode"] = "prefer"
-
-    return sync_url, connect_args
-
-
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
     url = config.get_main_option("sqlalchemy.url")
@@ -81,12 +54,16 @@ def do_run_migrations(connection: Connection) -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    sync_url, connect_args = _sync_url_and_connect_args(backend_config.database_url)
-    connectable = create_engine(
-        sync_url,
-        poolclass=pool.NullPool,
-        connect_args=connect_args,
-    )
+    url = backend_config.database_url
+    # Convert asyncpg URL to psycopg2 sync URL and strip SSL query params
+    sync_url = url.replace("postgresql+asyncpg://", "postgresql://")
+    # Remove ?ssl=require and similar params psycopg2 doesn't accept
+    if "?" in sync_url:
+        base, params = sync_url.split("?", 1)
+        # Keep only params psycopg2 understands (none of the asyncpg-specific ones)
+        sync_url = base
+    from sqlalchemy import create_engine
+    connectable = create_engine(sync_url, poolclass=pool.NullPool, connect_args={"sslmode": "require"})
 
     with connectable.connect() as connection:
         do_run_migrations(connection)

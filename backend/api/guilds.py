@@ -34,16 +34,13 @@ async def get_all_guilds(
     redis: Redis = Depends(get_redis),
     user_id: str = Depends(get_current_user_id),
 ) -> list[GuildResponse]:
-    """Return guilds the current user is authorized to manage."""
-    try:
-        user_guild_ids = set(await list_user_guild_ids(session, user_id))
-    except Exception as exc:
-        logger.error("guilds_list_user_failed", user_id=user_id, error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to load authorized servers. The database may need migrations — contact support or retry after redeploy.",
-        ) from exc
+    """Return all guilds known to the backend.
 
+    For now this is filtered only by whether the guild has ever been synced
+    (typically when an admin/mod logs into the dashboard).
+    """
+    # Only return guilds the current user is authorized to manage.
+    user_guild_ids = set(await list_user_guild_ids(session, user_id))
     if not user_guild_ids:
         return []
 

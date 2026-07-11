@@ -22,8 +22,7 @@ from backend.config import config
 from backend.api import health, relay, knowledge, usage, guilds, auth, bot_internal
 from backend.api import panels as panels_router
 from backend.api import contexts as contexts_router
-from backend.db.session import async_session_factory, engine
-from backend.db.migrations import run_migrations
+from backend.db.session import async_session_factory, engine, init_db
 from backend.services.reset_service import run_daily_reset, run_monthly_reset
 from backend.utils.embeddings import warmup_embeddings
 
@@ -83,6 +82,9 @@ async def _connect_with_retries(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: DB, Redis, migrations, scheduler."""
+    from alembic.config import Config
+    from alembic import command
+
     log = structlog.get_logger()
     log.info("phase", msg="Starting AI Ticket Assistant Backend")
 
@@ -96,19 +98,21 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     log.info("redis_connected")
 
-    # Database migrations (retry so we tolerate Postgres not quite ready)
+    # Database (retry so we tolerate Postgres not quite ready)
     async def connect_db():
-        await asyncio.to_thread(run_migrations)
+        await init_db()
 
     await _connect_with_retries(log, "db", max_attempts=10, interval=2.0, connect_fn=connect_db)
-    log.info("db_migrations_applied")
+    log.info("db_initialized")
 
-    async def _warmup_embeddings_background() -> None:
-        try:
-            await asyncio.to_thread(warmup_embeddings)
-            log.info("embeddings_warmed")
-        except Exception as e:
-            log.warning("embeddings_warmup_failed", error=str(e))
+    # Warm up sentence-transformer model at startup so first knowledge insert
+    # does not block for 30-60s during lazy model load.
+    try:
+        await asyncio.to_thread(warmup_embeddings)
+        log.info("embeddings_warmed")
+    except Exception as e:
+        # Best-effort optimization only; do not block API startup.
+        log.warning("embeddings_warmup_failed", error=str(e))
 
     # Scheduler for daily/monthly resets
     scheduler = AsyncIOScheduler()
@@ -133,9 +137,6 @@ async def lifespan(app: FastAPI):
     app.state.scheduler = scheduler
     log.info("scheduler_started")
 
-    # Do not block HTTP startup on HuggingFace model download.
-    asyncio.create_task(_warmup_embeddings_background())
-
     yield
 
     # Shutdown
@@ -152,10 +153,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins = config.frontend_allowed_origins or ["http://localhost:5173"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.frontend_allowed_origins,
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -182,10 +184,7 @@ if __name__ == "__main__":
         "backend.main:app",
         host=config.host,
         port=config.port,
-        reload=config.reload,
-        workers=config.uvicorn_workers if not config.reload else 1,
-        proxy_headers=True,
-        forwarded_allow_ips="*",
+        reload=True,
         log_level=config.log_level.lower(),
     )
 

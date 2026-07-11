@@ -3,8 +3,7 @@ FROM python:3.13-slim
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    RELOAD=false
+    PYTHONDONTWRITEBYTECODE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl gcc \
@@ -23,7 +22,7 @@ RUN uv pip install --system -r requirements.txt
 # Copy entire project
 COPY . .
 
-EXPOSE 8000
+ENV PYTHONPATH=/app
 
-# Production server (no reload). Set UVICORN_WORKERS in .env if needed.
+# Run application (production: no reload, trust reverse-proxy headers)
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]

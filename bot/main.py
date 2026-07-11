@@ -83,18 +83,6 @@ class AITicketBot(commands.Bot):
         # Let backend know which guilds currently have the bot installed.
         try:
             client = get_client()
-            logger.info("Backend URL: %s", config.backend_url)
-            session = await client._get_session()
-            async with session.get(f"{client.base_url}/health") as resp:
-                if resp.status == 200:
-                    logger.info("Backend health check OK (%s)", client.base_url)
-                else:
-                    body = await resp.text()
-                    logger.error(
-                        "Backend health check failed HTTP %s: %s",
-                        resp.status,
-                        body[:200],
-                    )
             for g in self.guilds:
                 await client.mark_guild_has_bot(str(g.id), name=g.name)
                 text_channels = [
