@@ -28,6 +28,14 @@ def _bot_guild_key(guild_id: int) -> str:
     return f"bot:guild:{guild_id}:installed"
 
 
+def _channels_key(guild_id: int) -> str:
+    return f"bot:guild:{guild_id}:channels"
+
+
+def _channels_sync_key(guild_id: int) -> str:
+    return f"bot:guild:{guild_id}:sync_channels"
+
+
 @router.get("/guilds", response_model=list[GuildResponse])
 async def get_all_guilds(
     session: AsyncSession = Depends(get_session),
@@ -361,8 +369,19 @@ async def get_guild_channels_dashboard(
 ) -> list:
     """Return cached text channels for dashboard channel selector."""
     import json
-    raw = await redis.get(f"bot:guild:{guild_id}:channels")
+    raw = await redis.get(_channels_key(guild_id))
     return json.loads(raw) if raw else []
+
+
+@router.post("/guilds/{guild_id}/channels/refresh")
+async def refresh_guild_channels_dashboard(
+    guild_id: int = Depends(require_guild_admin),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    """Ask the Discord bot to re-sync this guild's channel list into Redis."""
+    await redis.set(_channels_sync_key(guild_id), "1", ex=300)
+    logger.info("guild_channels_sync_requested", guild_id=guild_id)
+    return {"status": "queued"}
 
 
 @router.get("/guilds/{guild_id}/close-settings")

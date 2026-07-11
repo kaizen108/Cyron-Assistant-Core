@@ -39,6 +39,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _collect_sendable_text_channels(guild: discord.Guild) -> list[dict[str, str]]:
+    """Text channels where the bot can post panel embeds."""
+    me = guild.me
+    if me is None and guild._state.user:
+        me = guild.get_member(guild._state.user.id)
+    if me is None:
+        return []
+    channels: list[dict[str, str]] = []
+    for ch in guild.text_channels:
+        perms = ch.permissions_for(me)
+        if perms.view_channel and perms.send_messages:
+            channels.append({"id": str(ch.id), "name": ch.name})
+    channels.sort(key=lambda c: c["name"].lower())
+    return channels
+
+
 class AITicketBot(commands.Bot):
     """Main bot class."""
 
@@ -61,6 +77,23 @@ class AITicketBot(commands.Bot):
         await tickets.setup(self)
         await ticket_commands.setup(self)
         logger.info("Cogs loaded successfully")
+
+    async def _sync_guild_channels(self, guild: discord.Guild) -> None:
+        """Push sendable text channels to backend for dashboard selectors."""
+        client = get_client()
+        channels = _collect_sendable_text_channels(guild)
+        ok = await client.push_guild_channels(str(guild.id), channels)
+        if ok:
+            logger.info(
+                "Synced %d channel(s) for guild %s (%s)",
+                len(channels),
+                guild.id,
+                guild.name,
+            )
+        else:
+            logger.warning(
+                "Channel sync failed for guild %s (%s)", guild.id, guild.name
+            )
 
     async def on_ready(self) -> None:
         """Called when the bot is ready."""
@@ -85,22 +118,18 @@ class AITicketBot(commands.Bot):
             client = get_client()
             for g in self.guilds:
                 await client.mark_guild_has_bot(str(g.id), name=g.name)
-                text_channels = [
-                    {"id": str(ch.id), "name": ch.name}
-                    for ch in g.text_channels
-                ]
-                await client.push_guild_channels(str(g.id), text_channels)
+                await self._sync_guild_channels(g)
         except Exception as e:
             logger.warning(f"Failed to sync bot-installed guilds to backend: {e}")
 
-        # Periodically refresh installed flags so the dashboard stays accurate
-        # even after long uptimes.
+        # Periodically refresh installed flags and channel lists.
         async def _refresh_installed_flags() -> None:
             while not self.is_closed():
                 try:
                     client_inner = get_client()
                     for g in self.guilds:
                         await client_inner.mark_guild_has_bot(str(g.id), name=g.name)
+                        await self._sync_guild_channels(g)
                 except Exception as exc:  # pragma: no cover - best-effort
                     logger.warning("refresh_installed_flags_failed: %s", exc)
                 await asyncio.sleep(5 * 60)
@@ -130,6 +159,13 @@ class AITicketBot(commands.Bot):
 
         while not self.is_closed():
             try:
+                # On-demand channel sync requests from dashboard
+                for g in self.guilds:
+                    sync_key = f"bot:guild:{g.id}:sync_channels"
+                    if await redis.get(sync_key):
+                        await self._sync_guild_channels(g)
+                        await redis.delete(sync_key)
+
                 item = await redis.rpop("bot:pending_panel_sends")
                 if item:
                     task = json.loads(item)
@@ -161,6 +197,7 @@ class AITicketBot(commands.Bot):
             try:
                 client = get_client()
                 await client.mark_guild_has_bot(str(guild.id), name=guild.name)
+                await self._sync_guild_channels(guild)
             except Exception as e:
                 logger.warning("Failed to notify backend of new guild %s: %s", guild.id, e)
 

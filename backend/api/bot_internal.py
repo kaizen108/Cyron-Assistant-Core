@@ -50,8 +50,9 @@ async def push_guild_channels(
         gid = int(guild_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid guild_id")
-    await redis.set(_channels_key(gid), json.dumps(body.channels), ex=24 * 60 * 60)
-    return {"status": "ok"}
+    await redis.set(_channels_key(gid), json.dumps(body.channels), ex=7 * 24 * 60 * 60)
+    logger.info("guild_channels_cached", guild_id=gid, count=len(body.channels))
+    return {"status": "ok", "count": len(body.channels)}
 
 
 @router.get("/guilds/{guild_id}/channels")
