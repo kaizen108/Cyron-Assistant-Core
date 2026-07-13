@@ -7,7 +7,7 @@ import re
 from typing import Any, List, Tuple
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import MIN_SIMILARITY_THRESHOLD
@@ -784,6 +784,39 @@ async def invalidate_guild_relay_cache(redis, guild_id: int) -> None:
         logger.warning("relay_cache_invalidation_failed", guild_id=guild_id, error=str(e))
 
 
+def _normalize_context_ids(context_ids: list | None) -> list[uuid.UUID]:
+    """Parse and dedupe context UUIDs for scoped retrieval."""
+    if not context_ids:
+        return []
+    out: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for raw in context_ids:
+        if raw is None:
+            continue
+        try:
+            cid = raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+        except Exception:
+            continue
+        if cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
+def _embedding_for_knowledge(k: Knowledge) -> list[float] | None:
+    """Return stored embedding or compute one from structured fields."""
+    if k.embedding and len(k.embedding) > 0:
+        return k.embedding
+    main = (k.main_content or k.content or "").strip()
+    if not main and not (k.title or "").strip():
+        return None
+    tp = k.template_payload if isinstance(k.template_payload, dict) else None
+    line = expand_storage_embedding_text(k.title or "", main, tp)
+    if not line.strip():
+        return None
+    return embed_text(line)
+
+
 async def search_knowledge(
     session: AsyncSession,
     guild_id: int,
@@ -793,23 +826,30 @@ async def search_knowledge(
     embedding_query: str | None = None,
     *,
     ai_context_id=None,
+    ai_context_ids: list | None = None,
+    include_unscoped: bool = False,
+    search_all_guild: bool = False,
     skip_expansion: bool = False,
     early_exit_similarity: float | None = None,
 ) -> Tuple[list[Knowledge], float]:
     """
     Search knowledge by cosine similarity.
-    If ai_context_id is provided, restricts search to that context only.
+
+    When ai_context_ids (or ai_context_id) is provided, restricts search to those
+    contexts. include_unscoped also matches legacy rows with ai_context_id IS NULL.
+    search_all_guild ignores context filters (used for legacy tickets without a panel).
     """
-    import uuid as _uuid
     stmt = select(Knowledge).where(Knowledge.guild_id == guild_id)
-    if ai_context_id is not None:
-        if not isinstance(ai_context_id, _uuid.UUID):
-            try:
-                ai_context_id = _uuid.UUID(str(ai_context_id))
-            except Exception:
-                ai_context_id = None
-    if ai_context_id is not None:
-        stmt = stmt.where(Knowledge.ai_context_id == ai_context_id)
+
+    if not search_all_guild:
+        scoped_ids = _normalize_context_ids(ai_context_ids)
+        if not scoped_ids and ai_context_id is not None:
+            scoped_ids = _normalize_context_ids([ai_context_id])
+        if scoped_ids:
+            filters = [Knowledge.ai_context_id.in_(scoped_ids)]
+            if include_unscoped:
+                filters.append(Knowledge.ai_context_id.is_(None))
+            stmt = stmt.where(or_(*filters))
 
     result = await session.execute(stmt)
     all_k = list(result.scalars().all())
@@ -828,14 +868,32 @@ async def search_knowledge(
         q3 = embed_text(expanded_line) if expanded_line.strip() else None
 
     scored = []
+    backfilled_embeddings = False
     for k in all_k:
-        if k.embedding:
-            sim = cosine_similarity(q1, k.embedding)
-            if q2 is not None:
-                sim = max(sim, cosine_similarity(q2, k.embedding))
-            if q3 is not None:
-                sim = max(sim, cosine_similarity(q3, k.embedding))
-            scored.append((sim, k))
+        vec = _embedding_for_knowledge(k)
+        if not vec:
+            continue
+        if not k.embedding:
+            k.embedding = vec
+            backfilled_embeddings = True
+        sim = cosine_similarity(q1, vec)
+        if q2 is not None:
+            sim = max(sim, cosine_similarity(q2, vec))
+        if q3 is not None:
+            sim = max(sim, cosine_similarity(q3, vec))
+        # Lexical boost for short product/price queries (robux, nitro, etc.)
+        q_lower = (query or "").lower()
+        hay = f"{k.title or ''} {(k.main_content or k.content or '')}".lower()
+        if q_lower and any(
+            term in hay and term in q_lower
+            for term in ("robux", "nitro", "price", "cost", "€", "$")
+        ):
+            sim = min(1.0, sim + 0.12)
+        scored.append((sim, k))
+
+    if backfilled_embeddings:
+        await session.flush()
+
     scored.sort(key=lambda x: x[0], reverse=True)
     if not scored:
         return [], 0.0

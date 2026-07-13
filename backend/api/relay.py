@@ -242,6 +242,15 @@ async def relay_message(
         if not knowledge_context_id and guild.general_ai_enabled and general_context:
             knowledge_context_id = general_context.id
 
+        # Search scope: panel context + General Rules together; legacy tickets search all guild KB
+        knowledge_search_context_ids: list = []
+        if ai_context_id:
+            knowledge_search_context_ids.append(ai_context_id)
+        if general_context and guild.general_ai_enabled:
+            if general_context.id not in knowledge_search_context_ids:
+                knowledge_search_context_ids.append(general_context.id)
+        search_all_guild_kb = effective_panel_id is None and ticket.panel_id is None
+
         # 4. Concurrent sessions limit check (atomic INCR)
         allowed, msg, current_concurrent = await check_and_incr_concurrent(
             redis, guild_id, guild.plan
@@ -481,7 +490,8 @@ async def relay_message(
                     lang=lang,
                     embedding_expanded=bool(emb_query.strip()) and emb_query.strip() != qtext,
                     simple_candidate=simple_candidate,
-                    ai_context_id=str(knowledge_context_id) if knowledge_context_id else None,
+                    ai_context_ids=[str(c) for c in knowledge_search_context_ids],
+                    search_all_guild=search_all_guild_kb,
                 )
 
                 knowledge_items, top_similarity = await search_knowledge(
@@ -491,7 +501,9 @@ async def relay_message(
                     top_k=1 if simple_candidate else 4,
                     min_score=MIN_SIMILARITY_RETRIEVAL,
                     embedding_query=emb_query if emb_query.strip() else None,
-                    ai_context_id=knowledge_context_id,
+                    ai_context_ids=knowledge_search_context_ids or None,
+                    include_unscoped=not search_all_guild_kb,
+                    search_all_guild=search_all_guild_kb,
                     skip_expansion=simple_candidate,
                     early_exit_similarity=COMPACT_EARLY_EXIT_SIM if simple_candidate else None,
                 )
