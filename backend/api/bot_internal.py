@@ -186,9 +186,21 @@ async def open_ticket(
         except ValueError:
             pass
 
-    # Upsert to handle race conditions
+    # Upsert to handle race conditions / backfill missing bot_id on legacy rows
     existing = await get_ticket_by_channel(session, gid, body.channel_id)
     if existing:
+        updated = False
+        if existing.bot_id is None and body.bot_id is not None:
+            existing.bot_id = body.bot_id
+            updated = True
+        if existing.user_id is None and body.user_id is not None:
+            existing.user_id = body.user_id
+            updated = True
+        if existing.panel_id is None and panel_uuid is not None:
+            existing.panel_id = panel_uuid
+            updated = True
+        if updated:
+            await session.flush()
         return {"id": str(existing.id), "ticket_number": existing.ticket_number}
 
     ticket = Ticket(

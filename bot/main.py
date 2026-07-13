@@ -100,6 +100,14 @@ class AITicketBot(commands.Bot):
         logger.info(f"Bot logged in as {self.user} (ID: {self.user.id})")
         logger.info(f"Connected to {len(self.guilds)} guild(s)")
 
+        client = get_client()
+        if await client.verify_backend():
+            logger.info("Backend connectivity verified at %s", config.backend_url)
+        else:
+            logger.error(
+                "Backend connectivity check FAILED — tickets will not get AI replies until fixed"
+            )
+
         # Sync slash commands to each guild explicitly
         try:
             synced_count = 0

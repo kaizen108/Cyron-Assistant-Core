@@ -60,9 +60,21 @@ class BackendClient:
             async with session.get(url, headers=self._bot_headers) as response:
                 if response.status == 200:
                     return await response.json()
+                if response.status == 404:
+                    return None
+                text = await response.text()
+                logger.error(
+                    "get_ticket unexpected status=%s guild=%s channel=%s body=%s",
+                    response.status,
+                    guild_id,
+                    channel_id,
+                    text[:200],
+                )
                 return None
         except Exception as e:
-            logger.warning(f"Failed to fetch ticket {guild_id}/{channel_id}: {e}")
+            logger.error(
+                "Failed to fetch ticket %s/%s: %s", guild_id, channel_id, e
+            )
             return None
 
     async def mark_guild_has_bot(self, guild_id: str, name: str | None = None) -> None:
@@ -147,9 +159,23 @@ class BackendClient:
         session = await self._get_session()
         try:
             async with session.post(url, json=payload, headers=self._bot_headers) as r:
-                return await r.json() if r.status == 200 else {}
+                if r.status == 200:
+                    data = await r.json()
+                    if data.get("id"):
+                        return data
+                    logger.error("open_ticket missing id in response guild=%s channel=%s", guild_id, channel_id)
+                    return {}
+                text = await r.text()
+                logger.error(
+                    "open_ticket failed status=%s guild=%s channel=%s body=%s",
+                    r.status,
+                    guild_id,
+                    channel_id,
+                    text[:200],
+                )
+                return {}
         except Exception as e:
-            logger.warning("open_ticket failed: %s", e)
+            logger.error("open_ticket failed guild=%s channel=%s: %s", guild_id, channel_id, e)
             return {}
 
     async def close_ticket(self, guild_id: str, channel_id: str,
@@ -232,6 +258,35 @@ class BackendClient:
             logger.warning("get_stale_tickets failed: %s", e)
             return []
 
+    async def verify_backend(self) -> bool:
+        """Ping backend with bot credentials (call on startup)."""
+        url = f"{self.base_url}/health"
+        session = await self._get_session()
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    logger.error("Backend health check failed status=%s", response.status)
+                    return False
+        except Exception as exc:
+            logger.error("Backend unreachable at %s: %s", self.base_url, exc)
+            return False
+
+        # Verify bot API key against an internal endpoint
+        probe_url = f"{self.base_url}/internal/bot/tickets/stale"
+        try:
+            async with session.get(probe_url, headers=self._bot_headers) as response:
+                if response.status == 401:
+                    logger.error(
+                        "BOT_API_KEY rejected by backend — ticket relay and panel send will fail"
+                    )
+                    return False
+                if response.status != 200:
+                    logger.warning("Bot API probe returned status=%s", response.status)
+                return True
+        except Exception as exc:
+            logger.error("Bot API probe failed: %s", exc)
+            return False
+
     async def push_guild_channels(self, guild_id: str, channels: list) -> bool:
         url = f"{self.base_url}/internal/bot/guilds/{guild_id}/channels"
         session = await self._get_session()
@@ -280,6 +335,7 @@ class BackendClient:
 
         session = await self._get_session()
         last_error: Exception | None = None
+        relay_timeout = aiohttp.ClientTimeout(total=90)
 
         for attempt in range(max_retries + 1):
             try:
@@ -287,7 +343,7 @@ class BackendClient:
                     f"Relaying message to backend (attempt {attempt + 1}/{max_retries + 1})"
                 )
                 async with session.post(
-                    url, json=payload, headers=self._bot_headers
+                    url, json=payload, headers=self._bot_headers, timeout=relay_timeout
                 ) as response:
                     if response.status == 200:
                         data = await response.json()

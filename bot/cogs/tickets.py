@@ -55,15 +55,17 @@ class TicketsCog(commands.Cog):
             return None
         try:
             ticket_number = await self.client.next_ticket_number(str(guild.id))
-            await self.client.open_ticket(
+            opened = await self.client.open_ticket(
                 guild_id=str(guild.id),
                 channel_id=channel.id,
                 user_id=user_id,
                 panel_id=None,
-                bot_id=guild.me.id if guild.me else None,
+                bot_id=self.bot.user.id if self.bot.user else None,
                 ticket_number=ticket_number,
                 channel_name=channel.name,
             )
+            if not opened.get("id"):
+                return None
             self._ticket_cache.pop(channel.id, None)
             return await self._get_ticket_data(str(guild.id), channel.id)
         except Exception as exc:
@@ -201,15 +203,20 @@ class TicketsCog(commands.Cog):
                 ticket_number = await self.client.next_ticket_number(
                     str(interaction.guild.id)
                 )
-                await self.client.open_ticket(
+                opened = await self.client.open_ticket(
                     guild_id=str(interaction.guild.id),
                     channel_id=ticket_channel.id,
                     user_id=user_id,
                     panel_id=None,
-                    bot_id=interaction.guild.me.id if interaction.guild.me else None,
+                    bot_id=self.bot.user.id if self.bot.user else None,
                     ticket_number=ticket_number,
                     channel_name=ticket_channel_name,
                 )
+                if not opened.get("id"):
+                    logger.warning(
+                        "Legacy ticket backend registration returned no id (channel=%s)",
+                        ticket_channel.id,
+                    )
             except Exception as e:
                 logger.warning(
                     "Failed to register legacy ticket in backend (channel=%s): %s",
@@ -312,6 +319,10 @@ class TicketsCog(commands.Cog):
 
         # Not a registered ticket channel — skip
         if not ticket_data:
+            logger.debug(
+                "on_message skip: channel %s is not a registered ticket",
+                message.channel.id,
+            )
             return
 
         # Get panel data
@@ -345,6 +356,13 @@ class TicketsCog(commands.Cog):
             return  # Don't relay staff messages
 
         if not self._should_ai_reply(ticket_data, panel):
+            logger.info(
+                "on_message skip: AI disabled channel=%s panel=%s handoff=%s ai_auto_reply=%s",
+                message.channel.id,
+                panel_id,
+                ticket_data.get("human_handoff"),
+                (panel or {}).get("ai_auto_reply"),
+            )
             return
 
         # All checks passed → relay to AI backend
@@ -430,8 +448,23 @@ class TicketsCog(commands.Cog):
                 message.channel.id, e,
                 exc_info=True,
             )
-            # Don't send error message if backend rejected due to bot isolation (403)
-            if "403" in str(e) or "different bot" in str(e).lower():
+            err = str(e).lower()
+            if "401" in err or "invalid bot credentials" in err:
+                try:
+                    await message.channel.send(
+                        "⚠️ Bot cannot reach the AI backend (authentication error). "
+                        "Please ask a server admin to verify `BOT_API_KEY` matches on both "
+                        "the API and bot containers."
+                    )
+                except Exception:
+                    pass
+                return
+            if "403" in err or "different bot" in err:
+                logger.error(
+                    "AI relay blocked by bot isolation channel=%s bot=%s",
+                    message.channel.id,
+                    self.bot.user.id if self.bot.user else None,
+                )
                 return
             # Don't spam error messages for every failure
             try:

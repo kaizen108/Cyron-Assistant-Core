@@ -1,7 +1,7 @@
 """Ticket service - get or create ticket."""
 
 import uuid
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.ticket import Ticket
@@ -13,14 +13,18 @@ async def get_ticket(
     channel_id: int,
     bot_id: int | None = None,
 ) -> Ticket | None:
-    """Get existing open ticket by guild and channel. If bot_id given, must match."""
+    """Get existing open ticket by guild and channel.
+
+    When bot_id is provided, match tickets owned by that bot OR tickets with no
+    bot_id yet (legacy rows registered before bot isolation was enforced).
+    """
     stmt = select(Ticket).where(
         Ticket.guild_id == guild_id,
         Ticket.channel_id == channel_id,
         Ticket.status == "open",
     )
     if bot_id is not None:
-        stmt = stmt.where(Ticket.bot_id == bot_id)
+        stmt = stmt.where(or_(Ticket.bot_id == bot_id, Ticket.bot_id.is_(None)))
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
 

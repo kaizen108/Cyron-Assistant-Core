@@ -259,7 +259,7 @@ async def create_ticket_channel(
         channel_id=ticket_channel.id,
         user_id=member.id,
         panel_id=panel["id"],
-        bot_id=guild.me.id,
+        bot_id=interaction.client.user.id if interaction.client.user else None,
         ticket_number=ticket_number,
         channel_name=channel_name,
         form_answers=form_answers,

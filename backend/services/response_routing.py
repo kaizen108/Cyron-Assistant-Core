@@ -39,7 +39,7 @@ _THANKS_ACK = re.compile(
 )
 
 _HOW_ARE_YOU = re.compile(
-    r"^\s*(how\s+are\s+you|what\'?s\s+up|how\'?s\s+it\s+going|wie\s+geht\'?s|"
+    r"^\s*(how\s+are\s+you(\s+doing|\s+today)?|what\'?s\s+up|how\'?s\s+it\s+going|wie\s+geht\'?s|"
     r"comment\s+allez-vous|come\s+stai|qué\s+tal|cómo\s+estás)\s*[\?！!\.]?\s*$",
     re.IGNORECASE,
 )
