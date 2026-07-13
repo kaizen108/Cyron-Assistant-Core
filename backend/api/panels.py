@@ -26,7 +26,7 @@ class PanelIn(BaseModel):
     ai_context_id: uuid.UUID | None = None
     # General
     is_enabled: bool = True
-    ai_auto_reply: bool = False
+    ai_auto_reply: bool = True
     support_role_ids: list | None = None
     overflow_category_ids: list | None = None
     threading_mode: bool = False

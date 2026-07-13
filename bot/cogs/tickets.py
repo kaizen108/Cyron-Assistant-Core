@@ -29,12 +29,63 @@ class TicketsCog(commands.Cog):
 
     async def _get_ticket_data(self, guild_id: str, channel_id: int) -> dict | None:
         """Get ticket data with caching."""
-        if channel_id not in self._ticket_cache:
-            try:
-                self._ticket_cache[channel_id] = await self.client.get_ticket(guild_id, str(channel_id))
-            except Exception:
-                self._ticket_cache[channel_id] = None
-        return self._ticket_cache[channel_id]
+        if channel_id in self._ticket_cache:
+            return self._ticket_cache[channel_id]
+        try:
+            data = await self.client.get_ticket(guild_id, str(channel_id))
+        except Exception as exc:
+            logger.warning(
+                "get_ticket failed guild=%s channel=%s: %s",
+                guild_id,
+                channel_id,
+                exc,
+            )
+            return None
+        self._ticket_cache[channel_id] = data
+        return data
+
+    async def _ensure_legacy_ticket_registered(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        user_id: int,
+    ) -> dict | None:
+        """Register old /create-ticket channels that predate backend sync."""
+        if not channel.name.startswith("ticket-"):
+            return None
+        try:
+            ticket_number = await self.client.next_ticket_number(str(guild.id))
+            await self.client.open_ticket(
+                guild_id=str(guild.id),
+                channel_id=channel.id,
+                user_id=user_id,
+                panel_id=None,
+                bot_id=guild.me.id if guild.me else None,
+                ticket_number=ticket_number,
+                channel_name=channel.name,
+            )
+            self._ticket_cache.pop(channel.id, None)
+            return await self._get_ticket_data(str(guild.id), channel.id)
+        except Exception as exc:
+            logger.warning(
+                "legacy ticket auto-register failed channel=%s: %s",
+                channel.id,
+                exc,
+            )
+            return None
+
+    def _should_ai_reply(self, ticket_data: dict, panel: dict | None) -> bool:
+        """Return True when this ticket channel should relay to the AI backend."""
+        if ticket_data.get("human_handoff"):
+            return False
+        if panel:
+            if not panel.get("ai_auto_reply"):
+                return False
+            if not panel.get("ai_context_id") and not panel.get("general_ai_enabled"):
+                return False
+            return True
+        # Legacy /create-ticket tickets — relay using guild general rules
+        return True
 
     async def _get_panel_data(self, guild_id: str, panel_id: str) -> dict | None:
         """Get panel data with caching (keyed by channel for quick lookup)."""
@@ -145,6 +196,27 @@ class TicketsCog(commands.Cog):
                 reason=f"Ticket created by {interaction.user}",
             )
 
+            # Register ticket in backend so AI relay and dashboard tracking work
+            try:
+                ticket_number = await self.client.next_ticket_number(
+                    str(interaction.guild.id)
+                )
+                await self.client.open_ticket(
+                    guild_id=str(interaction.guild.id),
+                    channel_id=ticket_channel.id,
+                    user_id=user_id,
+                    panel_id=None,
+                    bot_id=interaction.guild.me.id if interaction.guild.me else None,
+                    ticket_number=ticket_number,
+                    channel_name=ticket_channel_name,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to register legacy ticket in backend (channel=%s): %s",
+                    ticket_channel.id,
+                    e,
+                )
+
             await interaction.response.send_message(
                 f"✅ Ticket created: {ticket_channel.mention}", ephemeral=True
             )
@@ -226,6 +298,18 @@ class TicketsCog(commands.Cog):
         # Get ticket data for this channel
         ticket_data = await self._get_ticket_data(str(message.guild.id), message.channel.id)
 
+        # Auto-register legacy ticket channels created before backend sync existed
+        if (
+            not ticket_data
+            and isinstance(message.channel, discord.TextChannel)
+            and isinstance(message.author, discord.Member)
+        ):
+            ticket_data = await self._ensure_legacy_ticket_registered(
+                message.guild,
+                message.channel,
+                message.author.id,
+            )
+
         # Not a registered ticket channel — skip
         if not ticket_data:
             return
@@ -260,18 +344,7 @@ class TicketsCog(commands.Cog):
                     logger.warning("Failed to set human_handoff: %s", e)
             return  # Don't relay staff messages
 
-        # --- AI auto-reply gating checks ---
-
-        # Check 1: Panel has ai_auto_reply enabled?
-        if not panel or not panel.get("ai_auto_reply"):
-            return
-
-        # Check 2: Panel has ai_context_id OR General Rules fallback is available?
-        if not panel.get("ai_context_id") and not panel.get("general_ai_enabled"):
-            return
-
-        # Check 3: Ticket not handed off to human?
-        if ticket_data.get("human_handoff"):
+        if not self._should_ai_reply(ticket_data, panel):
             return
 
         # All checks passed → relay to AI backend
@@ -318,7 +391,7 @@ class TicketsCog(commands.Cog):
                 # Send handoff message and ping support roles
                 handoff_msg = "I'm connecting you with a human agent. A support team member will assist you shortly."
                 pings = []
-                for role_id in (panel.get("support_role_ids") or []):
+                for role_id in ((panel or {}).get("support_role_ids") or []):
                     role = message.guild.get_role(int(role_id))
                     if role:
                         pings.append(role.mention)
