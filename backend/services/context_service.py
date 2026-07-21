@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.ai_context import AIContext
 from backend.models.guild import Guild
-from backend.utils.embeddings import embed_text
 
 logger = structlog.get_logger(__name__)
 
@@ -53,14 +52,9 @@ GENERAL_RULES_DEFAULT_GENERAL_INFO = (
 # ---------------------------------------------------------------------------
 
 def panel_cache_key(panel_id: uuid.UUID, context_version: int, lang: str, text: str) -> str:
-    """Versioned cache key — version bump auto-invalidates without Redis scan."""
+    """Versioned cache key — exact normalized query text prevents amount collisions."""
     norm = " ".join((text or "").strip().lower().split())
-    try:
-        vec = embed_text(norm)
-        buckets = ",".join(f"{round(v * 4) / 4:.2f}" for v in vec[:16])
-        digest = hashlib.sha256(buckets.encode()).hexdigest()[:24]
-    except Exception:
-        digest = hashlib.sha256(norm.encode()).hexdigest()[:24]
+    digest = hashlib.sha256(norm.encode()).hexdigest()[:24]
     return f"panel:{panel_id}:ctx:{context_version}:{lang}:{digest}"
 
 

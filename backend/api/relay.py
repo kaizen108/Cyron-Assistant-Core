@@ -36,7 +36,7 @@ from backend.services.ai_service import (
     get_natural_conversational_reply,
     get_support_reply_without_kb_chunks,
 )
-from backend.services.knowledge_service import search_knowledge, build_injection_chunk
+from backend.services.knowledge_service import search_knowledge, build_injection_chunk, query_has_specific_amount
 from backend.services.message_service import add_message, get_last_messages
 from backend.services.prompt_builder import (
     build_effective_system_prompt,
@@ -88,17 +88,12 @@ def _looks_like_simple_faq(text: str) -> bool:
 
 def _response_cache_key(guild_id: int, text: str, lang: str) -> str:
     norm = " ".join((text or "").strip().lower().split())
-    try:
-        vec = embed_text(norm)
-        coarse = ",".join(f"{x:.2f}" for x in vec[:12])
-        digest = hashlib.sha256(coarse.encode("utf-8")).hexdigest()[:24]
-    except Exception:
-        digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
+    digest = hashlib.sha256(norm.encode("utf-8")).hexdigest()[:24]
     return f"relay:short:{guild_id}:{lang}:{digest}"
 
 
 def _response_cache_key_fuzzy(guild_id: int, text: str, lang: str) -> str:
-    """Forgiving cache key — quantized embedding prefix (~neighborhood matches)."""
+    """Legacy fuzzy key — only used for non-numeric queries."""
     norm = " ".join((text or "").strip().lower().split())
     try:
         vec = embed_text(norm)
@@ -114,17 +109,21 @@ async def _cache_get_short(redis: Redis, guild_id: int, text: str, lang: str) ->
     hit = await redis.get(ek)
     if hit:
         return hit
-    fk = _response_cache_key_fuzzy(guild_id, text, lang)
-    return await redis.get(fk)
+    # Fuzzy cache only for queries without specific amounts (1000 vs 800 must not collide)
+    if not query_has_specific_amount(text):
+        fk = _response_cache_key_fuzzy(guild_id, text, lang)
+        return await redis.get(fk)
+    return None
 
 
 async def _cache_set_short(
     redis: Redis, guild_id: int, text: str, lang: str, blob: str
 ) -> None:
     ek = _response_cache_key(guild_id, text, lang)
-    fk = _response_cache_key_fuzzy(guild_id, text, lang)
     await redis.setex(ek, COMPACT_CACHE_TTL_SEC, blob)
-    await redis.setex(fk, COMPACT_CACHE_TTL_SEC, blob)
+    if not query_has_specific_amount(text):
+        fk = _response_cache_key_fuzzy(guild_id, text, lang)
+        await redis.setex(fk, COMPACT_CACHE_TTL_SEC, blob)
 
 
 @router.post("", response_model=RelayResponse)
@@ -439,6 +438,7 @@ async def relay_message(
             else:
                 qtext = (payload.content or "").strip()
                 simple_candidate = _is_simple_query(qtext) or _looks_like_simple_faq(qtext)
+                amount_specific = query_has_specific_amount(qtext)
 
                 if simple_candidate:
                     # v2: use versioned panel cache key if panel is known
@@ -482,7 +482,7 @@ async def relay_message(
                             pass
 
                 emb_query = ""
-                if not simple_candidate:
+                if not simple_candidate or amount_specific:
                     emb_query = await english_for_embedding_search(payload.content)
                 logger.info(
                     "relay_hybrid_retrieval",
@@ -490,22 +490,30 @@ async def relay_message(
                     lang=lang,
                     embedding_expanded=bool(emb_query.strip()) and emb_query.strip() != qtext,
                     simple_candidate=simple_candidate,
+                    amount_specific=amount_specific,
                     ai_context_ids=[str(c) for c in knowledge_search_context_ids],
                     search_all_guild=search_all_guild_kb,
+                )
+
+                search_top_k = 4 if (simple_candidate and amount_specific) else (1 if simple_candidate else 4)
+                use_early_exit = (
+                    COMPACT_EARLY_EXIT_SIM
+                    if simple_candidate and not amount_specific
+                    else None
                 )
 
                 knowledge_items, top_similarity = await search_knowledge(
                     session,
                     guild_id,
                     payload.content,
-                    top_k=1 if simple_candidate else 4,
+                    top_k=search_top_k,
                     min_score=MIN_SIMILARITY_RETRIEVAL,
                     embedding_query=emb_query if emb_query.strip() else None,
                     ai_context_ids=knowledge_search_context_ids or None,
                     include_unscoped=not search_all_guild_kb,
                     search_all_guild=search_all_guild_kb,
-                    skip_expansion=simple_candidate,
-                    early_exit_similarity=COMPACT_EARLY_EXIT_SIM if simple_candidate else None,
+                    skip_expansion=simple_candidate and not amount_specific,
+                    early_exit_similarity=use_early_exit,
                 )
 
                 borderline = COMPACT_HIGH_MATCH <= top_similarity < COMPACT_STRONG_MATCH
@@ -515,7 +523,7 @@ async def relay_message(
 
                 max_for_chunks = 4
                 if simple_candidate:
-                    max_for_chunks = 1 if top_similarity >= COMPACT_STRONG_MATCH else 2
+                    max_for_chunks = 1 if (top_similarity >= COMPACT_STRONG_MATCH and not amount_specific) else 2
 
                 last_msgs = await get_last_messages(session, ticket.id, limit=6)
                 knowledge_chunks = [

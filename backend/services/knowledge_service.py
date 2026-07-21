@@ -173,13 +173,55 @@ def _truncate(value: str | None, limit: int) -> str | None:
     return value[:limit].strip()
 
 
+def _extract_numbers(text: str) -> set[str]:
+    """Normalize numeric tokens from text (e.g. '1,700' → '1700')."""
+    raw = re.findall(r"\d[\d,.\s]*\d|\d+", text or "")
+    out: set[str] = set()
+    for n in raw:
+        cleaned = re.sub(r"[\s,]", "", n)
+        if cleaned:
+            out.add(cleaned.lstrip("0") or "0")
+    return out
+
+
+def _apply_lexical_rerank(query: str, title: str, body: str, base_sim: float) -> float:
+    """Boost/penalize KB rows based on numeric and product-term overlap."""
+    q_lower = (query or "").lower()
+    hay = f"{title or ''} {body or ''}"
+    hay_lower = hay.lower()
+    q_nums = _extract_numbers(query)
+
+    if q_nums:
+        k_nums = _extract_numbers(hay)
+        overlap = q_nums & k_nums
+        if overlap:
+            return min(1.0, base_sim + 0.30)
+        if k_nums:
+            return max(0.0, base_sim - 0.25)
+
+    if q_lower and any(
+        term in hay_lower and term in q_lower
+        for term in ("robux", "nitro", "price", "cost", "€", "$")
+    ):
+        return min(1.0, base_sim + 0.06)
+
+    return base_sim
+
+
+def query_has_specific_amount(text: str) -> bool:
+    """True when the user query contains a numeric amount (e.g. 1000 robux)."""
+    return bool(_extract_numbers(text))
+
+
 def _compress_for_query(text: str, query: str, limit: int = 300) -> str:
     src = (text or "").strip()
     if not src:
         return ""
     if len(src) <= limit:
         return src
-    q_terms = {t.lower() for t in re.findall(r"\w+", query or "") if len(t) >= 3}
+    q_nums = _extract_numbers(query)
+    q_terms = {t.lower() for t in re.findall(r"\w+", query or "") if len(t) >= 2}
+    q_terms.update(q_nums)
     parts = re.split(r"(?<=[.!?])\s+|\n+", src)
     ranked: list[tuple[int, str]] = []
     for p in parts:
@@ -187,7 +229,14 @@ def _compress_for_query(text: str, query: str, limit: int = 300) -> str:
         if not s:
             continue
         p_terms = {t.lower() for t in re.findall(r"\w+", s)}
+        p_terms.update(_extract_numbers(s))
         score = len(q_terms.intersection(p_terms))
+        if q_nums:
+            p_nums = _extract_numbers(s)
+            if q_nums & p_nums:
+                score += 20
+            elif p_nums:
+                score -= 10
         ranked.append((score, s))
     ranked.sort(key=lambda x: x[0], reverse=True)
     out = " ".join(x[1] for x in ranked[:2]).strip()
@@ -881,14 +930,8 @@ async def search_knowledge(
             sim = max(sim, cosine_similarity(q2, vec))
         if q3 is not None:
             sim = max(sim, cosine_similarity(q3, vec))
-        # Lexical boost for short product/price queries (robux, nitro, etc.)
-        q_lower = (query or "").lower()
-        hay = f"{k.title or ''} {(k.main_content or k.content or '')}".lower()
-        if q_lower and any(
-            term in hay and term in q_lower
-            for term in ("robux", "nitro", "price", "cost", "€", "$")
-        ):
-            sim = min(1.0, sim + 0.12)
+        body = (k.main_content or k.content or "")
+        sim = _apply_lexical_rerank(query, k.title or "", body, sim)
         scored.append((sim, k))
 
     if backfilled_embeddings:
