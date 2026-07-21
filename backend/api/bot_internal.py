@@ -33,8 +33,16 @@ def _channels_key(guild_id: int) -> str:
     return f"bot:guild:{guild_id}:channels"
 
 
+def _discovery_key(guild_id: int) -> str:
+    return f"bot:guild:{guild_id}:discovery"
+
+
 class ChannelListPayload(BaseModel):
-    channels: list[dict]  # [{id, name, type}]
+    channels: list[dict]  # [{id, name, type, category_name?}]
+
+
+class DiscoveryPayload(BaseModel):
+    discovery: dict
 
 
 @router.post("/guilds/{guild_id}/channels")
@@ -53,6 +61,33 @@ async def push_guild_channels(
     await redis.set(_channels_key(gid), json.dumps(body.channels), ex=7 * 24 * 60 * 60)
     logger.info("guild_channels_cached", guild_id=gid, count=len(body.channels))
     return {"status": "ok", "count": len(body.channels)}
+
+
+@router.post("/guilds/{guild_id}/discovery")
+async def push_guild_discovery(
+    guild_id: str,
+    body: DiscoveryPayload,
+    _: None = Depends(require_bot_api_key),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    """Bot pushes rich guild metadata for AI discovery scan."""
+    import json
+    try:
+        gid = int(guild_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid guild_id")
+    await redis.set(
+        _discovery_key(gid),
+        json.dumps(body.discovery),
+        ex=7 * 24 * 60 * 60,
+    )
+    logger.info(
+        "guild_discovery_cached",
+        guild_id=gid,
+        channels=len(body.discovery.get("channels") or []),
+        roles=len(body.discovery.get("roles") or []),
+    )
+    return {"status": "ok"}
 
 
 @router.get("/guilds/{guild_id}/channels")

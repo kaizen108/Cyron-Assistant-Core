@@ -18,6 +18,10 @@ from backend.services.context_service import (
     list_contexts,
     update_context,
 )
+from backend.schemas.ai_discovery import CompileInput, CompileOutput
+from backend.schemas.knowledge import KnowledgeCreate
+from backend.services.general_rules_compiler import compile_general_rules
+from backend.services.knowledge_service import create_structured_knowledge
 
 router = APIRouter(prefix="/guilds/{guild_id}/contexts", tags=["contexts"])
 
@@ -124,6 +128,75 @@ async def update_general_rules(
         general_info=ctx.general_info,
         enabled=guild.general_ai_enabled,
     )
+
+
+@router.post("/general/compile", response_model=CompileOutput)
+async def compile_general_rules_endpoint(
+    body: CompileInput = Body(...),
+    guild_id: int = Depends(require_guild_admin),
+    session: AsyncSession = Depends(get_session),
+):
+    """Compile wizard/manual answers into the 4 General Rules sections."""
+    result = await session.execute(select(Guild).where(Guild.id == guild_id))
+    guild = result.scalar_one_or_none()
+    if not guild:
+        raise HTTPException(status_code=404, detail="Guild not found")
+
+    ctx = await ensure_general_rules_context(session, guild)
+    compiled = await compile_general_rules(body)
+
+    if body.activate:
+        ctx.instructions = compiled.instructions
+        ctx.general_info = compiled.general_info or None
+        guild.general_ai_enabled = True
+        ctx.context_version += 1
+
+        plan = (guild.plan or "free").lower()
+        for ps in compiled.problems:
+            try:
+                await create_structured_knowledge(
+                    session,
+                    guild_id,
+                    KnowledgeCreate(
+                        title=ps.problem[:200],
+                        content=f"{ps.problem}\n\n{ps.solution}",
+                        main_content=ps.solution,
+                        additional_context=ps.problem,
+                        template_type="problem_solution",
+                        template_payload={"problem": ps.problem, "solution": ps.solution},
+                        persist_mode="structured",
+                        ai_context_id=ctx.id,
+                        section="problems",
+                    ),
+                    plan=plan,
+                )
+            except Exception:
+                pass
+
+        for kn in compiled.knowledge:
+            try:
+                await create_structured_knowledge(
+                    session,
+                    guild_id,
+                    KnowledgeCreate(
+                        title=kn.title[:200],
+                        content=kn.content,
+                        main_content=kn.content,
+                        template_type="general_knowledge",
+                        persist_mode="structured",
+                        ai_context_id=ctx.id,
+                        section=kn.section or "knowledge",
+                    ),
+                    plan=plan,
+                )
+            except Exception:
+                pass
+
+        await session.flush()
+        compiled.enabled = True
+        compiled.context_id = str(ctx.id)
+
+    return compiled
 
 
 @router.get("/{context_id}", response_model=ContextOut)

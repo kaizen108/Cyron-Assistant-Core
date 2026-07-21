@@ -50,9 +50,71 @@ def _collect_sendable_text_channels(guild: discord.Guild) -> list[dict[str, str]
     for ch in guild.text_channels:
         perms = ch.permissions_for(me)
         if perms.view_channel and perms.send_messages:
-            channels.append({"id": str(ch.id), "name": ch.name})
+            cat = ch.category.name if ch.category else None
+            channels.append({
+                "id": str(ch.id),
+                "name": ch.name,
+                "type": "text",
+                "category_name": cat,
+            })
     channels.sort(key=lambda c: c["name"].lower())
     return channels
+
+
+def _collect_guild_discovery_data(guild: discord.Guild) -> dict:
+    """Rich guild metadata for AI discovery scan (Level 1 heuristics)."""
+    text_count = 0
+    voice_count = 0
+    all_channels: list[dict] = []
+    categories: list[dict] = []
+
+    for cat in guild.categories:
+        categories.append({"id": str(cat.id), "name": cat.name})
+
+    for ch in guild.channels:
+        if isinstance(ch, discord.TextChannel):
+            text_count += 1
+            all_channels.append({
+                "id": str(ch.id),
+                "name": ch.name,
+                "type": "text",
+                "category_id": str(ch.category_id) if ch.category_id else None,
+                "category_name": ch.category.name if ch.category else None,
+            })
+        elif isinstance(ch, discord.VoiceChannel):
+            voice_count += 1
+            all_channels.append({
+                "id": str(ch.id),
+                "name": ch.name,
+                "type": "voice",
+                "category_id": str(ch.category_id) if ch.category_id else None,
+                "category_name": ch.category.name if ch.category else None,
+            })
+
+    roles: list[dict] = []
+    for role in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if role.is_default():
+            continue
+        roles.append({
+            "id": str(role.id),
+            "name": role.name,
+            "position": role.position,
+            "is_admin": role.permissions.administrator,
+            "manage_guild": role.permissions.manage_guild,
+            "manage_channels": role.permissions.manage_channels,
+        })
+
+    features = list(guild.features)
+    return {
+        "description": guild.description or "",
+        "channels": all_channels,
+        "categories": categories,
+        "roles": roles,
+        "text_channel_count": text_count,
+        "voice_channel_count": voice_count,
+        "is_community": "COMMUNITY" in features,
+        "features": features,
+    }
 
 
 class AITicketBot(commands.Bot):
@@ -79,10 +141,12 @@ class AITicketBot(commands.Bot):
         logger.info("Cogs loaded successfully")
 
     async def _sync_guild_channels(self, guild: discord.Guild) -> None:
-        """Push sendable text channels to backend for dashboard selectors."""
+        """Push sendable channels + discovery metadata to backend."""
         client = get_client()
         channels = _collect_sendable_text_channels(guild)
+        discovery = _collect_guild_discovery_data(guild)
         ok = await client.push_guild_channels(str(guild.id), channels)
+        disc_ok = await client.push_guild_discovery(str(guild.id), discovery)
         if ok:
             logger.info(
                 "Synced %d channel(s) for guild %s (%s)",
@@ -93,6 +157,10 @@ class AITicketBot(commands.Bot):
         else:
             logger.warning(
                 "Channel sync failed for guild %s (%s)", guild.id, guild.name
+            )
+        if not disc_ok:
+            logger.warning(
+                "Discovery sync failed for guild %s (%s)", guild.id, guild.name
             )
 
     async def on_ready(self) -> None:
@@ -213,6 +281,69 @@ class AITicketBot(commands.Bot):
         )
         return True
 
+    async def _execute_extract_job(self, redis, task: dict) -> None:
+        """Read Discord channels for transcript extraction (HTML + messages)."""
+        import json
+
+        guild_id = int(task["guild_id"])
+        request_id = task.get("request_id")
+        channel_ids = task.get("channel_ids") or []
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            try:
+                guild = await self.fetch_guild(guild_id)
+            except discord.NotFound:
+                return
+
+        messages: list[str] = []
+        html_contents: list[str] = []
+        processed: list[str] = []
+
+        for cid in channel_ids:
+            channel = guild.get_channel(int(cid))
+            if channel is None:
+                try:
+                    channel = await self.fetch_channel(int(cid))
+                except discord.NotFound:
+                    continue
+            if not isinstance(channel, discord.TextChannel):
+                continue
+
+            processed.append(str(cid))
+            try:
+                async for msg in channel.history(limit=150, oldest_first=True):
+                    author = msg.author.display_name if msg.author else "Unknown"
+                    content = (msg.content or "").strip()
+                    if content:
+                        messages.append(f"{author}: {content}")
+                    for att in msg.attachments:
+                        if att.filename.lower().endswith((".html", ".htm")):
+                            try:
+                                data = await att.read()
+                                html_contents.append(data.decode("utf-8", errors="ignore"))
+                            except Exception:
+                                pass
+                        elif att.filename.lower().endswith(".txt"):
+                            try:
+                                data = await att.read()
+                                messages.append(data.decode("utf-8", errors="ignore")[:4000])
+                            except Exception:
+                                pass
+            except discord.Forbidden:
+                logger.warning("extract: no access to channel %s", cid)
+
+        if request_id:
+            payload = {
+                "messages": messages[:500],
+                "html_contents": html_contents[:20],
+                "channels_processed": processed,
+            }
+            await redis.set(
+                f"bot:extract:result:{request_id}",
+                json.dumps(payload),
+                ex=120,
+            )
+
     async def _poll_panel_sends(self) -> None:
         """Poll Redis queue for pending panel send tasks."""
         import json
@@ -266,6 +397,13 @@ class AITicketBot(commands.Bot):
                             task.get("guild_id"),
                             task.get("channel_id"),
                         )
+
+                extract_item = await redis.rpop("bot:pending_extracts")
+                if extract_item:
+                    try:
+                        await self._execute_extract_job(redis, json.loads(extract_item))
+                    except Exception as exc:
+                        logger.warning("extract_job failed: %s", exc, exc_info=True)
             except Exception as e:
                 logger.warning("panel_send_poll error: %s", e)
                 try:

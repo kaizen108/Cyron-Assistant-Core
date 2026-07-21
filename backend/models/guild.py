@@ -35,7 +35,7 @@ class Guild(Base):
     general_ai_context_id: Mapped[uuid.UUID | None] = mapped_column(
         PGUUID(as_uuid=True), ForeignKey("ai_contexts.id"), nullable=True
     )
-    general_ai_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    general_ai_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Close settings
     close_embed_title: Mapped[str | None] = mapped_column(String(256), nullable=True, default="Ticket Closed")

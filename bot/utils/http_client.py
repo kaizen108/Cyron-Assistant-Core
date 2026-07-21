@@ -308,6 +308,27 @@ class BackendClient:
             logger.warning("push_guild_channels failed guild=%s: %s", guild_id, e)
             return False
 
+    async def push_guild_discovery(self, guild_id: str, discovery: dict) -> bool:
+        url = f"{self.base_url}/internal/bot/guilds/{guild_id}/discovery"
+        session = await self._get_session()
+        try:
+            async with session.post(
+                url, json={"discovery": discovery}, headers=self._bot_headers
+            ) as r:
+                if r.status == 200:
+                    return True
+                text = await r.text()
+                logger.warning(
+                    "push_guild_discovery_failed status=%s body=%s guild=%s",
+                    r.status,
+                    text,
+                    guild_id,
+                )
+                return False
+        except Exception as e:
+            logger.warning("push_guild_discovery failed guild=%s: %s", guild_id, e)
+            return False
+
     async def relay_message(
         self,
         guild_id: str,

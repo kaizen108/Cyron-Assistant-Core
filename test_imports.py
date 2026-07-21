@@ -47,7 +47,11 @@ try:
     print("[OK] backend.config imported successfully")
     
     from backend.api import health, relay
-    print("[OK] backend.api imported successfully")
+    from backend.api import ai_discovery
+    from backend.services.ai_discovery_service import run_discovery_scan
+    from backend.services.general_rules_compiler import compile_general_rules_deterministic
+    from backend.services.ai_extraction_service import parse_ticket_tool_html
+    print("[OK] backend.api + Phase 1 AI discovery imported successfully")
     
     from backend.schemas.relay import RelayRequest, RelayResponse
     print("[OK] backend.schemas.relay imported successfully")

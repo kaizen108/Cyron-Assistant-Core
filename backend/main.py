@@ -22,6 +22,7 @@ from backend.config import config
 from backend.api import health, relay, knowledge, usage, guilds, auth, bot_internal
 from backend.api import panels as panels_router
 from backend.api import contexts as contexts_router
+from backend.api import ai_discovery as ai_discovery_router
 from backend.db.session import async_session_factory, engine, init_db
 from backend.services.reset_service import run_daily_reset, run_monthly_reset
 from backend.utils.embeddings import warmup_embeddings
@@ -198,6 +199,7 @@ app.include_router(usage.router)
 app.include_router(relay.router)
 app.include_router(panels_router.router)
 app.include_router(contexts_router.router)
+app.include_router(ai_discovery_router.router)
 
 
 @app.get("/")
