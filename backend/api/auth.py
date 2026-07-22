@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, status
 from fastapi.responses import RedirectResponse, JSONResponse
-from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from backend.config import config
+from backend.db.session import async_session_factory
+from backend.dependencies import get_redis
 from backend.services.auth_service import (
     build_discord_authorize_url,
     decode_app_token,
@@ -20,13 +23,13 @@ from backend.services.auth_service import (
     issue_app_token,
     parse_state_token,
 )
-from backend.db.session import get_session
-from backend.dependencies import get_redis
 from backend.services.guild_service import upsert_guild
 from backend.services.user_guild_service import upsert_user_guilds
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+_OAUTH_CODE_CACHE_TTL_SEC = 300
 
 
 def _allowed_redirect_uris() -> list[str]:
@@ -48,6 +51,113 @@ def _append_query_param(url: str, key: str, value: str) -> str:
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
+def _oauth_code_cache_key(code: str, redirect_uri: str) -> str:
+    digest = hashlib.sha256(f"{code}:{redirect_uri}".encode()).hexdigest()[:32]
+    return f"oauth:code:{digest}"
+
+
+def _has_admin_or_manage(perms: object, owner: object) -> bool:
+    if owner:
+        return True
+    try:
+        value = int(perms) if perms is not None else 0
+    except (TypeError, ValueError):
+        value = 0
+    return bool(value & (0x8 | 0x20))
+
+
+async def _sync_user_guilds_background(
+    access_token: str,
+    user_id: str,
+    redis: Redis,
+) -> None:
+    """Best-effort guild sync after login — runs in background so OAuth responds fast."""
+    if not user_id:
+        return
+    try:
+        user_guilds = await fetch_user_guilds(access_token)
+        admin_guilds = [
+            g
+            for g in user_guilds
+            if _has_admin_or_manage(g.get("permissions"), g.get("owner"))
+        ]
+        admin_guild_ids: list[int] = []
+
+        async with async_session_factory() as session:
+            for g in admin_guilds:
+                gid = g.get("id")
+                name = g.get("name") or ""
+                if not gid:
+                    continue
+                try:
+                    gid_int = int(gid)
+                except (TypeError, ValueError):
+                    continue
+
+                await upsert_guild(session, gid_int, name=name)
+                admin_guild_ids.append(gid_int)
+
+                icon_hash = g.get("icon")
+                if icon_hash:
+                    icon_url = f"https://cdn.discordapp.com/icons/{gid_int}/{icon_hash}.png"
+                    await redis.set(f"guild:{gid_int}:icon_url", icon_url)
+
+            if admin_guild_ids:
+                await upsert_user_guilds(session, user_id, admin_guild_ids, role="admin")
+
+            await session.commit()
+
+        logger.info(
+            "auth_discord_sync_guilds_background",
+            guild_count=len(admin_guild_ids),
+            user_id=user_id,
+        )
+    except Exception as exc:
+        logger.warning("auth_discord_sync_guilds_failed", error=str(exc))
+
+
+async def _complete_oauth_login(
+    code: str,
+    state: str,
+    redis: Redis,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    """Exchange code, issue token, cache response, queue guild sync."""
+    redirect_uri = parse_state_token(state)
+    if not _is_allowed_redirect_uri(redirect_uri):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="redirect_uri is not allowed.",
+        )
+
+    cache_key = _oauth_code_cache_key(code, redirect_uri)
+    cached = await redis.get(cache_key)
+    if cached:
+        logger.info("auth_discord_code_cache_hit")
+        return json.loads(cached)
+
+    access_token = await exchange_code_for_access_token(code, redirect_uri)
+    discord_user = await fetch_discord_user(access_token)
+    user_id = str(discord_user.get("id", ""))
+
+    app_token = issue_app_token(discord_user)
+    response_data = {
+        "token": app_token,
+        "redirect": f"{config.frontend_public_url}/dashboard",
+    }
+
+    await redis.setex(cache_key, _OAUTH_CODE_CACHE_TTL_SEC, json.dumps(response_data))
+
+    background_tasks.add_task(
+        _sync_user_guilds_background,
+        access_token,
+        user_id,
+        redis,
+    )
+
+    return response_data
+
+
 @router.get("/discord")
 async def start_discord_oauth(
     redirect_uri: str = Query(..., description="Frontend callback URL"),
@@ -59,15 +169,11 @@ async def start_discord_oauth(
             detail="redirect_uri is not allowed.",
         )
 
-    # We now use the frontend callback URL directly as Discord redirect_uri.
     discord_url = build_discord_authorize_url(
         redirect_uri=redirect_uri,
         callback_url=redirect_uri,
     )
-    logger.info(
-        "auth_discord_start",
-        redirect_uri=redirect_uri,
-    )
+    logger.info("auth_discord_start", redirect_uri=redirect_uri)
     return RedirectResponse(url=discord_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -75,10 +181,10 @@ async def start_discord_oauth(
 async def discord_oauth_callback(
     code: str = Query(...),
     state: str = Query(...),
-    session: AsyncSession = Depends(get_session),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     redis: Redis = Depends(get_redis),
 ):
-    """Legacy handler (no longer used by frontend)."""
+    """Legacy handler — redirect to frontend with token."""
     redirect_uri = parse_state_token(state)
     if not _is_allowed_redirect_uri(redirect_uri):
         raise HTTPException(
@@ -86,70 +192,9 @@ async def discord_oauth_callback(
             detail="redirect_uri is not allowed.",
         )
 
-    callback_url = redirect_uri
-    access_token = await exchange_code_for_access_token(code, callback_url)
-    discord_user = await fetch_discord_user(access_token)
-
-    # Best-effort: sync user's admin/mod guilds into DB so dashboard can list servers.
-    try:
-        user_guilds = await fetch_user_guilds(access_token)
-
-        def _has_admin_or_manage(perms: object, owner: object) -> bool:
-            if owner:
-                return True
-            try:
-                value = int(perms) if perms is not None else 0
-            except (TypeError, ValueError):
-                value = 0
-            # ADMINISTRATOR (0x8) or MANAGE_GUILD (0x20)
-            return bool(value & (0x8 | 0x20))
-
-        admin_guilds = [
-            g
-            for g in user_guilds
-            if _has_admin_or_manage(g.get("permissions"), g.get("owner"))
-        ]
-
-        # Persist guilds and user↔guild mappings for authorization
-        user_id = str(discord_user.get("id", ""))
-        admin_guild_ids: list[int] = []
-
-        for g in admin_guilds:
-            gid = g.get("id")
-            name = g.get("name") or ""
-            if not gid:
-                continue
-            try:
-                gid_int = int(gid)
-            except (TypeError, ValueError):
-                continue
-
-            await upsert_guild(session, gid_int, name=name)
-            admin_guild_ids.append(gid_int)
-
-            icon_hash = g.get("icon")
-            if icon_hash:
-                icon_url = (
-                    f"https://cdn.discordapp.com/icons/{gid_int}/{icon_hash}.png"
-                )
-                await redis.set(f"guild:{gid_int}:icon_url", icon_url)
-
-        # Record which guilds this user may manage.
-        if user_id and admin_guild_ids:
-            await upsert_user_guilds(session, user_id, admin_guild_ids, role="admin")
-
-        await session.commit()
-        logger.info(
-            "auth_discord_sync_guilds",
-            guild_count=len(admin_guild_ids),
-            user_id=user_id,
-        )
-    except Exception as exc:  # pragma: no cover - non-critical
-        logger.warning("auth_discord_sync_guilds_failed", error=str(exc))
-
-    app_token = issue_app_token(discord_user)
-    final_url = _append_query_param(redirect_uri, "token", app_token)
-    logger.info("auth_discord_success_legacy", discord_user_id=discord_user.get("id"))
+    response_data = await _complete_oauth_login(code, state, redis, background_tasks)
+    final_url = _append_query_param(redirect_uri, "token", response_data["token"])
+    logger.info("auth_discord_success_legacy")
     return RedirectResponse(url=final_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
@@ -157,85 +202,13 @@ async def discord_oauth_callback(
 async def discord_oauth_callback_json(
     code: str = Query(...),
     state: str = Query(...),
-    session: AsyncSession = Depends(get_session),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     redis: Redis = Depends(get_redis),
 ):
-    """Handle Discord callback for frontend, issue app token, and return JSON."""
-    redirect_uri = parse_state_token(state)
-    if not _is_allowed_redirect_uri(redirect_uri):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="redirect_uri is not allowed.",
-        )
-
-    callback_url = redirect_uri
-    access_token = await exchange_code_for_access_token(code, callback_url)
-    discord_user = await fetch_discord_user(access_token)
-
-    # Same guild sync logic as legacy handler
-    try:
-        user_guilds = await fetch_user_guilds(access_token)
-
-        def _has_admin_or_manage(perms: object, owner: object) -> bool:
-            if owner:
-                return True
-            try:
-                value = int(perms) if perms is not None else 0
-            except (TypeError, ValueError):
-                value = 0
-            # ADMINISTRATOR (0x8) or MANAGE_GUILD (0x20)
-            return bool(value & (0x8 | 0x20))
-
-        admin_guilds = [
-            g
-            for g in user_guilds
-            if _has_admin_or_manage(g.get("permissions"), g.get("owner"))
-        ]
-
-        # Persist guilds and user↔guild mappings for authorization
-        user_id = str(discord_user.get("id", ""))
-        admin_guild_ids: list[int] = []
-
-        for g in admin_guilds:
-            gid = g.get("id")
-            name = g.get("name") or ""
-            if not gid:
-                continue
-            try:
-                gid_int = int(gid)
-            except (TypeError, ValueError):
-                continue
-
-            await upsert_guild(session, gid_int, name=name)
-            admin_guild_ids.append(gid_int)
-
-            icon_hash = g.get("icon")
-            if icon_hash:
-                icon_url = (
-                    f"https://cdn.discordapp.com/icons/{gid_int}/{icon_hash}.png"
-                )
-                await redis.set(f"guild:{gid_int}:icon_url", icon_url)
-
-        if user_id and admin_guild_ids:
-            await upsert_user_guilds(session, user_id, admin_guild_ids, role="admin")
-
-        await session.commit()
-        logger.info(
-            "auth_discord_sync_guilds_json",
-            guild_count=len(admin_guild_ids),
-            user_id=user_id,
-        )
-    except Exception as exc:  # pragma: no cover - non-critical
-        logger.warning("auth_discord_sync_guilds_failed", error=str(exc))
-
-    app_token = issue_app_token(discord_user)
-    logger.info("auth_discord_success_json", discord_user_id=discord_user.get("id"))
-    return JSONResponse(
-        {
-            "token": app_token,
-            "redirect": f"{config.frontend_public_url}/dashboard",
-        }
-    )
+    """Handle Discord callback for frontend — return token immediately, sync guilds in background."""
+    response_data = await _complete_oauth_login(code, state, redis, background_tasks)
+    logger.info("auth_discord_success_json")
+    return JSONResponse(response_data)
 
 
 @router.get("/me")
